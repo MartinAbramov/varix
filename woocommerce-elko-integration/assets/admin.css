@@ -1,0 +1,207 @@
+/**
+ * ELKO Integration Admin Styles
+ */
+
+.elko-settings-section {
+    background: #fff;
+    border: 1px solid #ccd0d4;
+    border-radius: 4px;
+    padding: 20px;
+    margin: 20px 0;
+}
+
+.elko-sync-controls {
+    background: #fff;
+    border: 1px solid #ccd0d4;
+    border-radius: 4px;
+    padding: 20px;
+    margin: 20px 0;
+}
+
+.elko-sync-buttons {
+    display: flex;
+    gap: 10px;
+    margin: 20px 0;
+}
+
+.elko-sync-buttons .button {
+    flex: 1;
+    padding: 10px 20px;
+    height: auto;
+}
+
+.elko-progress {
+    margin: 20px 0;
+    display: none;
+}
+
+.elko-progress.active {
+    display: block;
+}
+
+.progress-bar {
+    width: 100%;
+    height: 20px;
+    background: #f1f1f1;
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #0073aa, #005a87);
+    width: 0%;
+    transition: width 0.3s ease;
+    animation: progress-pulse 2s infinite;
+}
+
+@keyframes progress-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
+.progress-text {
+    text-align: center;
+    margin-top: 10px;
+    font-weight: 500;
+}
+
+.elko-result {
+    margin: 20px 0;
+    padding: 15px;
+    border-radius: 4px;
+    display: none;
+}
+
+.elko-result.success {
+    background: #d4edda;
+    border: 1px solid #c3e6cb;
+    color: #155724;
+    display: block;
+}
+
+.elko-result.error {
+    background: #f8d7da;
+    border: 1px solid #f5c6cb;
+    color: #721c24;
+    display: block;
+}
+
+.elko-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 20px;
+    margin: 20px 0;
+}
+
+.elko-stat-card {
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    padding: 20px;
+    text-align: center;
+}
+
+.elko-stat-number {
+    font-size: 2em;
+    font-weight: bold;
+    color: #0073aa;
+}
+
+.elko-stat-label {
+    color: #666;
+    margin-top: 5px;
+}
+
+.elko-connection-test {
+    margin: 20px 0;
+    padding: 15px;
+    border-radius: 4px;
+}
+
+.elko-connection-test.success {
+    background: #d4edda;
+    border: 1px solid #c3e6cb;
+    color: #155724;
+}
+
+.elko-connection-test.failed {
+    background: #f8d7da;
+    border: 1px solid #f5c6cb;
+    color: #721c24;
+}
+
+.elko-connection-test.testing {
+    background: #fff3cd;
+    border: 1px solid #ffeaa7;
+    color: #856404;
+}
+
+.debug-details {
+    margin-top: 15px;
+    padding: 15px;
+    background: #f8f9fa;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 12px;
+}
+
+.debug-section {
+    margin: 10px 0;
+}
+
+.debug-section h5 {
+    margin: 10px 0 5px 0;
+    color: #0073aa;
+}
+
+.debug-section ul {
+    margin: 0;
+    padding-left: 20px;
+}
+
+.elko-alert {
+    padding: 15px;
+    margin: 15px 0;
+    border-radius: 4px;
+}
+
+.elko-alert-warning {
+    background: #fff3cd;
+    border: 1px solid #ffeaa7;
+    color: #856404;
+}
+
+.elko-alert-danger {
+    background: #f8d7da;
+    border: 1px solid #f5c6cb;
+    color: #721c24;
+}
+
+.elko-scheduler-status {
+    background: #f8f9fa;
+    padding: 15px;
+    border-radius: 4px;
+    margin: 15px 0;
+}
+
+.elko-scheduler-status ul {
+    margin: 10px 0;
+    padding-left: 20px;
+}
+
+.status-badge {
+    padding: 4px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+
+.status-success { background: #d4edda; color: #155724; }
+.status-error { background: #f8d7da; color: #721c24; }
+.status-info { background: #d1ecf1; color: #0c5460; }
+.status-warning { background: #fff3cd; color: #856404; }
+
+.log-error { background-color: #ffeaea; }
+.log-success { background-color: #eafaf1; }
