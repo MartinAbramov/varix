@@ -169,9 +169,18 @@ jQuery(document).ready(function($) {
         }
     }
     
-    // Generate new session ID
+    // Generate new session ID using crypto API if available
     function generateSessionId() {
-        currentSessionId = 'elko_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        var randomPart;
+        if (window.crypto && window.crypto.getRandomValues) {
+            var array = new Uint32Array(2);
+            window.crypto.getRandomValues(array);
+            randomPart = array[0].toString(36) + array[1].toString(36);
+        } else {
+            // Fallback for older browsers
+            randomPart = Math.random().toString(36).substr(2, 9);
+        }
+        currentSessionId = 'elko_' + Date.now() + '_' + randomPart;
         return currentSessionId;
     }
     
