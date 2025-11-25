@@ -1035,50 +1035,80 @@ class ELKO_Admin_Panel {
      */
     private function render_cron_tab() {
         $scheduler_status = $this->get_scheduler_status();
+        $cron_secret_key = get_option('elko_cron_secret_key', '');
+        if (empty($cron_secret_key)) {
+            $cron_secret_key = wp_generate_password(32, false);
+            update_option('elko_cron_secret_key', $cron_secret_key);
+        }
+        $plugin_path = plugin_dir_path(dirname(__FILE__));
         ?>
         <div class="elko-sync-controls">
             <h3>⏰ Cron Jobs Configuration</h3>
             
-            <div class="elko-alert" style="background: #e3f2fd; border: 1px solid #2196f3; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
-                <h4 style="margin: 0 0 10px 0;">📋 Server-Side Cron Setup</h4>
-                <p>For reliable execution, set up server-side cron job instead of WordPress cron:</p>
-                <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto;">
-# Run every 5 minutes (recommended for price updates)
-*/5 * * * * cd <?php echo ABSPATH; ?> && php wp-cron.php >> /var/log/wp-cron.log 2>&1
-
-# Alternative: Use WP-CLI
-*/5 * * * * cd <?php echo ABSPATH; ?> && wp cron event run --due-now >> /var/log/wp-cron.log 2>&1
-                </pre>
+            <!-- DIRECT CRON RUNNER - RECOMMENDED -->
+            <div class="elko-alert" style="background: #e8f5e9; border: 2px solid #4caf50; padding: 20px; border-radius: 4px; margin-bottom: 20px;">
+                <h4 style="margin: 0 0 15px 0; color: #2e7d32;">🚀 ПРЯМОЙ ЗАПУСК CRON (Рекомендуется для Zone.ee)</h4>
+                <p>Используйте специальный файл <code>cron-runner.php</code> для прямого запуска без WP-Cron:</p>
+                
+                <p><strong>📦 Импорт товаров:</strong></p>
+                <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 12px;">
+/usr/bin/curl -s "<?php echo plugins_url('cron-runner.php', dirname(__FILE__)); ?>?key=<?php echo esc_attr($cron_secret_key); ?>&action=sync_products"</pre>
+                
+                <p><strong>💰 Обновление цен:</strong></p>
+                <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 12px;">
+/usr/bin/curl -s "<?php echo plugins_url('cron-runner.php', dirname(__FILE__)); ?>?key=<?php echo esc_attr($cron_secret_key); ?>&action=update_prices"</pre>
+                
+                <p><strong>📁 Синхронизация категорий:</strong></p>
+                <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 12px;">
+/usr/bin/curl -s "<?php echo plugins_url('cron-runner.php', dirname(__FILE__)); ?>?key=<?php echo esc_attr($cron_secret_key); ?>&action=sync_categories"</pre>
+                
+                <p><strong>🖼️ Исправление изображений:</strong></p>
+                <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 12px;">
+/usr/bin/curl -s "<?php echo plugins_url('cron-runner.php', dirname(__FILE__)); ?>?key=<?php echo esc_attr($cron_secret_key); ?>&action=fix_images"</pre>
+                
+                <p><strong>🏷️ Импорт атрибутов:</strong></p>
+                <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 12px;">
+/usr/bin/curl -s "<?php echo plugins_url('cron-runner.php', dirname(__FILE__)); ?>?key=<?php echo esc_attr($cron_secret_key); ?>&action=import_attributes"</pre>
+                
+                <p style="margin-top: 15px;"><strong>⚠️ Ваш секретный ключ:</strong> <code style="background: #ffeb3b; padding: 2px 6px;"><?php echo esc_html($cron_secret_key); ?></code></p>
+                <p style="font-size: 12px; color: #666;">Этот ключ защищает cron от несанкционированного доступа. НЕ делитесь им публично!</p>
             </div>
             
             <div class="elko-alert" style="background: #fff3e0; border: 1px solid #ff9800; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
-                <h4 style="margin: 0 0 10px 0;">🌐 Zone.ee Hosting - Cron Setup</h4>
-                <p>Для хостинга Zone.ee используйте следующие настройки в панели управления:</p>
+                <h4 style="margin: 0 0 10px 0;">🌐 Zone.ee - Пример настройки Cron</h4>
+                <p>В панели Zone.ee добавьте cron задание:</p>
                 
-                <p><strong>Для ежедневного импорта товаров (рекомендуется):</strong></p>
-                <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto;">
-# Команда для Zone.ee cron:
-cd <?php echo ABSPATH; ?> && /usr/bin/php wp-cron.php
-
-# Или через curl:
-/usr/bin/curl -s "<?php echo site_url('/wp-cron.php?doing_wp_cron'); ?>" > /dev/null 2>&1
-                </pre>
-                
-                <p><strong>Рекомендуемое расписание:</strong></p>
-                <ul style="margin: 10px 0; padding-left: 20px;">
-                    <li><strong>Синхронизация цен и наличия:</strong> каждые 30 минут</li>
-                    <li><strong>Полный импорт товаров:</strong> раз в день (ночью, например в 03:00)</li>
-                    <li><strong>Импорт категорий:</strong> раз в неделю</li>
-                </ul>
-                
-                <p><strong>Пример cron записей для Zone.ee:</strong></p>
-                <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto;">
-# Цены каждые 30 минут
-*/30 * * * * /usr/bin/curl -s "<?php echo site_url('/wp-cron.php?doing_wp_cron'); ?>"
-
-# Полный импорт в 3:00 ночи
-0 3 * * * /usr/bin/curl -s "<?php echo site_url('/wp-cron.php?doing_wp_cron'); ?>"
-                </pre>
+                <table class="widefat" style="margin: 15px 0;">
+                    <thead>
+                        <tr>
+                            <th>Задача</th>
+                            <th>Расписание</th>
+                            <th>Команда</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Импорт товаров</td>
+                            <td>Раз в день в 3:00</td>
+                            <td style="font-size: 11px;"><code>/usr/bin/curl -s "<?php echo plugins_url('cron-runner.php', dirname(__FILE__)); ?>?key=<?php echo esc_attr($cron_secret_key); ?>&action=sync_products"</code></td>
+                        </tr>
+                        <tr>
+                            <td>Обновление цен</td>
+                            <td>Каждые 30 мин</td>
+                            <td style="font-size: 11px;"><code>/usr/bin/curl -s "<?php echo plugins_url('cron-runner.php', dirname(__FILE__)); ?>?key=<?php echo esc_attr($cron_secret_key); ?>&action=update_prices"</code></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="elko-alert" style="background: #e3f2fd; border: 1px solid #2196f3; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
+                <h4 style="margin: 0 0 10px 0;">📋 Альтернатива: WP-Cron (требует включения Scheduler)</h4>
+                <p>Если хотите использовать WP-Cron, нужно:</p>
+                <ol>
+                    <li>Нажать кнопку "🔄 Enable Scheduler" на вкладке Synchronization</li>
+                    <li>Добавить в cron: <code>/usr/bin/curl -s "<?php echo site_url('/wp-cron.php?doing_wp_cron'); ?>"</code></li>
+                </ol>
+                <p style="color: #666; font-size: 12px;">Примечание: WP-Cron менее надёжен, чем прямой запуск через cron-runner.php</p>
             </div>
             
             <h4>Current Scheduled Events:</h4>
@@ -1111,7 +1141,7 @@ cd <?php echo ABSPATH; ?> && /usr/bin/php wp-cron.php
             
             <h4 style="margin-top: 20px;">Environment Variables (for wp-config.php):</h4>
             <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto;">
-// Disable WordPress built-in cron (use server cron instead)
+// Отключить встроенный WP-Cron (рекомендуется при использовании server cron)
 define('DISABLE_WP_CRON', true);
 
 // ELKO Integration Settings (optional)
