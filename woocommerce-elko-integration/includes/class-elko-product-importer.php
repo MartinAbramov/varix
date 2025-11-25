@@ -695,9 +695,13 @@ class ELKO_Product_Importer {
         
         $product->set_name($product_name);
         
+        // Get description from API "Description" criteria, fallback to basic description
         $enhanced_description = $this->build_enhanced_description($detailed_description, $description);
         $product->set_description($enhanced_description);
-        $product->set_short_description($short_description);
+        
+        // Get short description from API "Summary" criteria, fallback to shortDescription
+        $enhanced_short_description = $this->build_short_description($detailed_description, $short_description);
+        $product->set_short_description($enhanced_short_description);
         
         // Use manufacturerCode as SKU
         $manufacturer_code = $this->extract_manufacturer_code($detailed_description, $product_data);
@@ -754,7 +758,7 @@ class ELKO_Product_Importer {
     }
     
     /**
-     * Update existing product with prices and stock
+     * Update existing product with prices, stock, descriptions and attributes
      */
     private function update_existing_product($product_id, $product_data, $category_name) {
         try {
@@ -778,6 +782,23 @@ class ELKO_Product_Importer {
                 $wc_product->set_manage_stock(true);
                 $wc_product->set_stock_quantity($stock_quantity);
                 $wc_product->set_stock_status($stock_quantity > 0 ? 'instock' : 'outofstock');
+            }
+            
+            // Update descriptions from API data
+            $detailed_description = $product_data['detailed_description'] ?? array();
+            $description = $product_data['description'] ?? '';
+            $short_description = $product_data['shortDescription'] ?? '';
+            
+            // Update full description from "Description" criteria
+            $enhanced_description = $this->build_enhanced_description($detailed_description, $description);
+            if (!empty($enhanced_description)) {
+                $wc_product->set_description($enhanced_description);
+            }
+            
+            // Update short description from "Summary" criteria
+            $enhanced_short_description = $this->build_short_description($detailed_description, $short_description);
+            if (!empty($enhanced_short_description)) {
+                $wc_product->set_short_description($enhanced_short_description);
             }
             
             $wc_product->save();
@@ -1098,6 +1119,7 @@ class ELKO_Product_Importer {
         
         if (isset($detailed_description['description']) && is_array($detailed_description['description'])) {
             foreach ($detailed_description['description'] as $criteria) {
+                // Look for "Description" criteria (full product description from API)
                 if (isset($criteria['criteria']) && $criteria['criteria'] === 'Description' && !empty($criteria['value'])) {
                     $description = $criteria['value'];
                     break;
@@ -1119,6 +1141,35 @@ class ELKO_Product_Importer {
         }
         
         return $description;
+    }
+    
+    /**
+     * Extract short description (Summary) from detailed description API data
+     */
+    private function build_short_description($detailed_description, $fallback_short_description = '') {
+        $short_description = '';
+        
+        if (isset($detailed_description['description']) && is_array($detailed_description['description'])) {
+            foreach ($detailed_description['description'] as $criteria) {
+                // Look for "Summary" criteria (short product description from API)
+                if (isset($criteria['criteria']) && $criteria['criteria'] === 'Summary' && !empty($criteria['value'])) {
+                    $short_description = $criteria['value'];
+                    break;
+                }
+            }
+        }
+        
+        if (empty($short_description)) {
+            $short_description = $fallback_short_description;
+        }
+        
+        // Clean and format short description
+        if (!empty($short_description)) {
+            $short_description = wp_strip_all_tags($short_description);
+            $short_description = html_entity_decode($short_description, ENT_QUOTES, 'UTF-8');
+        }
+        
+        return $short_description;
     }
     
     private function set_product_dimensions($product, $detailed_description) {

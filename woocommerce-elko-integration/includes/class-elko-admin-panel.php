@@ -1051,6 +1051,36 @@ class ELKO_Admin_Panel {
                 </pre>
             </div>
             
+            <div class="elko-alert" style="background: #fff3e0; border: 1px solid #ff9800; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
+                <h4 style="margin: 0 0 10px 0;">🌐 Zone.ee Hosting - Cron Setup</h4>
+                <p>Для хостинга Zone.ee используйте следующие настройки в панели управления:</p>
+                
+                <p><strong>Для ежедневного импорта товаров (рекомендуется):</strong></p>
+                <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto;">
+# Команда для Zone.ee cron:
+cd <?php echo ABSPATH; ?> && /usr/bin/php wp-cron.php
+
+# Или через curl:
+/usr/bin/curl -s "<?php echo site_url('/wp-cron.php?doing_wp_cron'); ?>" > /dev/null 2>&1
+                </pre>
+                
+                <p><strong>Рекомендуемое расписание:</strong></p>
+                <ul style="margin: 10px 0; padding-left: 20px;">
+                    <li><strong>Синхронизация цен и наличия:</strong> каждые 30 минут</li>
+                    <li><strong>Полный импорт товаров:</strong> раз в день (ночью, например в 03:00)</li>
+                    <li><strong>Импорт категорий:</strong> раз в неделю</li>
+                </ul>
+                
+                <p><strong>Пример cron записей для Zone.ee:</strong></p>
+                <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto;">
+# Цены каждые 30 минут
+*/30 * * * * /usr/bin/curl -s "<?php echo site_url('/wp-cron.php?doing_wp_cron'); ?>"
+
+# Полный импорт в 3:00 ночи
+0 3 * * * /usr/bin/curl -s "<?php echo site_url('/wp-cron.php?doing_wp_cron'); ?>"
+                </pre>
+            </div>
+            
             <h4>Current Scheduled Events:</h4>
             <table class="widefat striped">
                 <thead>
