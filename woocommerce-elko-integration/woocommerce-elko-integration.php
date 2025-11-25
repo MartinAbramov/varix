@@ -189,8 +189,30 @@ class WooCommerce_ELKO_Integration {
             KEY created_at (created_at)
         ) $charset_collate;";
         
+        // Progress tracking table
+        $progress_table = $wpdb->prefix . 'elko_import_progress';
+        $progress_sql = "CREATE TABLE $progress_table (
+            id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+            import_type varchar(50) NOT NULL,
+            session_id varchar(64) NOT NULL,
+            total_items int(11) NOT NULL DEFAULT 0,
+            processed_items int(11) NOT NULL DEFAULT 0,
+            current_item varchar(255) DEFAULT NULL,
+            status varchar(20) NOT NULL DEFAULT 'running',
+            started_at datetime DEFAULT CURRENT_TIMESTAMP,
+            updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            completed_at datetime DEFAULT NULL,
+            error_count int(11) NOT NULL DEFAULT 0,
+            last_error text,
+            PRIMARY KEY (id),
+            KEY session_id (session_id),
+            KEY import_type (import_type),
+            KEY status (status)
+        ) $charset_collate;";
+        
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
         dbDelta($logs_sql);
+        dbDelta($progress_sql);
     }
     
     /**

@@ -1,36 +1,51 @@
 jQuery(document).ready(function($) {
     'use strict';
     
-    console.log('ELKO Admin JS loaded at 2025-10-21 14:19:42');
+    console.log('ELKO Admin JS loaded');
     console.log('AJAX URL:', elko_ajax.ajax_url);
-    console.log('Nonce:', elko_ajax.nonce);
-    console.log('User: MartinAbramov');
+    
+    var currentSessionId = elko_ajax.current_session || '';
+    var progressInterval = null;
     
     // Helper function for AJAX requests
-    function makeAjaxRequest(action, data, button) {
+    function makeAjaxRequest(action, data, button, showProgressBar) {
         data = data || {};
         data.action = action;
         data.nonce = elko_ajax.nonce;
         
-        button.prop('disabled', true);
-        var originalText = button.text();
-        button.text('⏳ Processing...');
+        if (showProgressBar) {
+            data.session_id = currentSessionId;
+        }
+        
+        if (button) {
+            button.prop('disabled', true);
+            var originalText = button.text();
+            button.text('⏳ Processing...');
+        }
         
         console.log('Making AJAX request:', action, data);
+        
+        if (showProgressBar) {
+            showProgress('Starting...');
+            startProgressPolling();
+        }
         
         $.ajax({
             url: elko_ajax.ajax_url,
             type: 'POST',
             data: data,
-            timeout: 300000, // 5 minutes
+            timeout: 600000, // 10 minutes
             success: function(response) {
                 console.log('AJAX Success for', action, ':', response);
+                
+                stopProgressPolling();
+                hideProgress();
                 
                 if (response.success) {
                     showResult(response.data, 'success');
                     
-                    // Refresh page after successful scheduler toggle
-                    if (action === 'elko_toggle_scheduler' || action === 'elko_emergency_stop') {
+                    // Refresh page after scheduler changes
+                    if (action === 'elko_toggle_scheduler' || action === 'elko_emergency_stop' || action === 'elko_nuclear_stop') {
                         setTimeout(function() {
                             window.location.reload();
                         }, 2000);
@@ -41,12 +56,15 @@ jQuery(document).ready(function($) {
             },
             error: function(xhr, status, error) {
                 console.log('AJAX Error for', action, ':', xhr, status, error);
-                console.log('Response text:', xhr.responseText);
-                showResult('AJAX Error: ' + error + ' (Status: ' + status + '). Check console for details.', 'error');
+                stopProgressPolling();
+                hideProgress();
+                showResult('AJAX Error: ' + error + ' (Status: ' + status + ')', 'error');
             },
             complete: function() {
-                button.prop('disabled', false);
-                button.text(originalText);
+                if (button) {
+                    button.prop('disabled', false);
+                    button.text(originalText);
+                }
             }
         });
     }
@@ -60,13 +78,15 @@ jQuery(document).ready(function($) {
         if (resultDiv.length === 0) {
             resultDiv = $('#debug-result');
         }
+        if (resultDiv.length === 0) {
+            resultDiv = $('#settings-result');
+        }
         
         resultDiv.removeClass('success error')
                  .addClass(type)
-                 .html('<strong>' + (type === 'success' ? '✅ ' : '❌ ') + '</strong>' + message)
-                 .show();
+                 .css('display', 'block')
+                 .html('<strong>' + (type === 'success' ? '✅ ' : '❌ ') + '</strong>' + message);
         
-        // Auto hide after 15 seconds for success messages
         if (type === 'success') {
             setTimeout(function() {
                 resultDiv.fadeOut();
@@ -74,36 +94,130 @@ jQuery(document).ready(function($) {
         }
     }
     
+    // Show progress bar
+    function showProgress(message) {
+        var progressDiv = $('#sync-progress');
+        progressDiv.show();
+        progressDiv.find('.progress-current').text(message);
+        progressDiv.find('.progress-stats').text('');
+        progressDiv.find('.progress-fill').css('width', '0%');
+    }
+    
+    // Hide progress bar
+    function hideProgress() {
+        var progressDiv = $('#sync-progress');
+        progressDiv.find('.progress-fill').css('width', '100%');
+        setTimeout(function() {
+            progressDiv.hide();
+            progressDiv.find('.progress-fill').css('width', '0%');
+        }, 500);
+    }
+    
+    // Update progress display
+    function updateProgressDisplay(data) {
+        var progressDiv = $('#sync-progress');
+        
+        if (data.current_item) {
+            progressDiv.find('.progress-current').text('📦 ' + data.current_item);
+        }
+        
+        var statsText = '';
+        if (data.total > 0) {
+            statsText = data.processed + ' / ' + data.total + ' (' + data.percentage + '%)';
+        }
+        if (data.error_count > 0) {
+            statsText += ' | Errors: ' + data.error_count;
+        }
+        progressDiv.find('.progress-stats').text(statsText);
+        
+        progressDiv.find('.progress-fill').css('width', data.percentage + '%');
+    }
+    
+    // Start progress polling
+    function startProgressPolling() {
+        if (progressInterval) {
+            clearInterval(progressInterval);
+        }
+        
+        progressInterval = setInterval(function() {
+            $.ajax({
+                url: elko_ajax.ajax_url,
+                type: 'POST',
+                data: {
+                    action: 'elko_get_progress',
+                    nonce: elko_ajax.nonce,
+                    session_id: currentSessionId
+                },
+                success: function(response) {
+                    if (response.success && response.data) {
+                        updateProgressDisplay(response.data);
+                        
+                        if (response.data.status === 'completed' || response.data.status === 'stopped' || response.data.status === 'error') {
+                            stopProgressPolling();
+                        }
+                    }
+                }
+            });
+        }, 1000); // Poll every second
+    }
+    
+    // Stop progress polling
+    function stopProgressPolling() {
+        if (progressInterval) {
+            clearInterval(progressInterval);
+            progressInterval = null;
+        }
+    }
+    
+    // Generate new session ID
+    function generateSessionId() {
+        currentSessionId = 'elko_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        return currentSessionId;
+    }
+    
+    // Get selected categories
+    function getSelectedCategories() {
+        var selected = $('#import-categories').val();
+        return selected || [];
+    }
+    
+    // Stop Import (graceful)
+    $('#stop-import').on('click', function(e) {
+        e.preventDefault();
+        
+        if (!confirm('⏹️ Stop current import gracefully? The current item will finish processing.')) {
+            return;
+        }
+        
+        makeAjaxRequest('elko_stop_import', { session_id: currentSessionId }, $(this));
+    });
+    
     // Emergency Stop
     $('#emergency-stop').on('click', function(e) {
         e.preventDefault();
         
-        if (!confirm('🚨 Are you sure you want to FORCE STOP all ELKO imports immediately? This will disable scheduler and clear all scheduled tasks.')) {
+        if (!confirm('🚨 FORCE STOP all ELKO imports immediately? This will disable scheduler and clear all tasks.')) {
             return;
         }
         
-        console.log('Emergency stop clicked at 2025-10-21 14:19:42 by MartinAbramov');
         makeAjaxRequest('elko_emergency_stop', {}, $(this));
     });
     
-    // FIXED: Toggle Scheduler with proper button detection
+    // Toggle Scheduler
     $('#disable-scheduler, #enable-scheduler').on('click', function(e) {
         e.preventDefault();
         
         var buttonId = $(this).attr('id');
         var isDisabling = buttonId === 'disable-scheduler';
         
-        console.log('Scheduler button clicked:', buttonId, 'isDisabling:', isDisabling);
-        
         var confirmText = isDisabling ? 
-            '🛑 Disable automatic scheduling? This will stop all scheduled ELKO imports and clear all cron jobs.' :
-            '🔄 Enable automatic scheduling? This will start scheduled ELKO imports according to configuration.';
+            '🛑 Disable automatic scheduling? This will stop all scheduled ELKO imports.' :
+            '🔄 Enable automatic scheduling? Scheduled imports will start running.';
             
         if (!confirm(confirmText)) {
             return;
         }
         
-        console.log('Toggle scheduler confirmed:', isDisabling ? 'disable' : 'enable', 'at 2025-10-21 14:19:42 by MartinAbramov');
         makeAjaxRequest('elko_toggle_scheduler', { force_action: isDisabling ? 'disable' : 'enable' }, $(this));
     });
     
@@ -115,35 +229,61 @@ jQuery(document).ready(function($) {
             return;
         }
         
-        console.log('Sync categories clicked at 2025-10-21 14:19:42 by MartinAbramov');
-        showProgress('Importing categories with hierarchy...');
-        makeAjaxRequest('elko_sync_categories', {}, $(this));
+        generateSessionId();
+        makeAjaxRequest('elko_sync_categories', {}, $(this), true);
     });
     
     // Sync Products
     $('#sync-products').on('click', function(e) {
         e.preventDefault();
         
-        if (!confirm('Start product synchronization? This may take a long time and import many products with images and attributes.')) {
+        var selectedCategories = getSelectedCategories();
+        var categoryMsg = selectedCategories.length > 0 
+            ? 'Import products from ' + selectedCategories.length + ' selected categories?'
+            : 'Import products from ALL allowed categories? This may take a long time.';
+        
+        if (!confirm(categoryMsg)) {
             return;
         }
         
-        console.log('Sync products clicked at 2025-10-21 14:19:42 by MartinAbramov');
-        showProgress('Importing products with enhanced data (gallery, attributes, descriptions)...');
-        makeAjaxRequest('elko_sync_products', {}, $(this));
+        generateSessionId();
+        makeAjaxRequest('elko_sync_products', { categories: selectedCategories }, $(this), true);
+    });
+    
+    // Import Attributes
+    $('#import-attributes').on('click', function(e) {
+        e.preventDefault();
+        
+        if (!confirm('Import/update attributes for all existing ELKO products? This will fetch data from the Description API endpoint.')) {
+            return;
+        }
+        
+        generateSessionId();
+        makeAjaxRequest('elko_import_attributes', {}, $(this), true);
     });
     
     // Update Prices
     $('#update-prices').on('click', function(e) {
         e.preventDefault();
         
-        if (!confirm('Update all product prices from ELKO API?')) {
+        if (!confirm('Update all product prices and stock from ELKO API?')) {
             return;
         }
         
-        console.log('Update prices clicked at 2025-10-21 14:19:42 by MartinAbramov');
-        showProgress('Updating product prices...');
-        makeAjaxRequest('elko_update_prices', {}, $(this));
+        generateSessionId();
+        makeAjaxRequest('elko_update_prices', {}, $(this), true);
+    });
+    
+    // Fix Images
+    $('#fix-images').on('click', function(e) {
+        e.preventDefault();
+        
+        if (!confirm('Re-import all product images? This will delete existing images and download fresh ones from ELKO.')) {
+            return;
+        }
+        
+        generateSessionId();
+        makeAjaxRequest('elko_fix_images', {}, $(this), true);
     });
     
     // Clear All Data
@@ -158,95 +298,113 @@ jQuery(document).ready(function($) {
             return;
         }
         
-        console.log('Clear all data clicked at 2025-10-21 14:19:42 by MartinAbramov');
-        showProgress('Deleting all ELKO data...');
         makeAjaxRequest('elko_clear_all_data', {}, $(this));
     });
     
     // Test Connection
     $('#test-connection').on('click', function(e) {
         e.preventDefault();
-        console.log('Test connection clicked at 2025-10-21 14:19:42 by MartinAbramov');
         makeAjaxRequest('elko_test_connection', {}, $(this));
     });
     
     // Debug Endpoints
     $('#debug-endpoints').on('click', function(e) {
         e.preventDefault();
-        console.log('Debug endpoints clicked at 2025-10-21 14:19:42 by MartinAbramov');
         makeAjaxRequest('elko_debug_endpoints', {}, $(this));
     });
     
-    // NUCLEAR OPTION - Force Kill All ELKO Processes
-    if ($('#nuclear-stop').length === 0) {
-        $('#emergency-stop').after('<button type="button" id="nuclear-stop" class="button" style="background: #8B0000; color: white; border-color: #8B0000; font-size: 16px; padding: 12px 24px; height: auto; margin-left: 10px;">☢️ NUCLEAR STOP</button>');
-    }
-    
-    $('#nuclear-stop').on('click', function(e) {
+    // Save Settings via AJAX
+    $('#save-elko-settings').on('click', function(e) {
         e.preventDefault();
         
-        if (!confirm('☢️ NUCLEAR OPTION: This will forcefully kill ALL WordPress cron jobs and ELKO processes. This may affect other plugins. Continue?')) {
-            return;
-        }
+        var button = $(this);
+        button.prop('disabled', true).text('⏳ Saving...');
         
-        if (!confirm('☢️ FINAL WARNING: This will clear ALL WordPress scheduled events, not just ELKO. Continue only if emergency!')) {
-            return;
-        }
+        var formData = {
+            action: 'elko_save_settings',
+            nonce: elko_ajax.nonce,
+            api_url: $('input[name="elko_api_url"]').val(),
+            api_key: $('textarea[name="elko_api_key"]').val(),
+            tax_percentage: $('input[name="elko_tax_percentage"]').val(),
+            markup_percentage: $('input[name="elko_markup_percentage"]').val(),
+            price_calculation_method: $('select[name="elko_price_calculation_method"]').val(),
+            round_prices: $('input[name="elko_round_prices"]').is(':checked') ? 1 : 0,
+            sync_frequency: $('select[name="elko_sync_frequency"]').val()
+        };
         
-        console.log('NUCLEAR STOP clicked at 2025-10-21 14:19:42 by MartinAbramov');
-        makeAjaxRequest('elko_nuclear_stop', {}, $(this));
-    });
-    
-    // Show progress
-    function showProgress(message) {
-        var progressDiv = $('#sync-progress');
-        var progressText = progressDiv.find('.progress-text');
-        
-        progressText.text(message);
-        progressDiv.addClass('active').show();
-        
-        // Animate progress bar
-        var progressFill = progressDiv.find('.progress-fill');
-        progressFill.css('width', '0%');
-        
-        var width = 0;
-        var interval = setInterval(function() {
-            width += Math.random() * 10;
-            if (width > 90) {
-                width = 90;
-                clearInterval(interval);
+        $.ajax({
+            url: elko_ajax.ajax_url,
+            type: 'POST',
+            data: formData,
+            success: function(response) {
+                if (response.success) {
+                    $('#settings-result')
+                        .removeClass('error')
+                        .addClass('success')
+                        .html('<strong>✅</strong> ' + response.data)
+                        .show();
+                    
+                    setTimeout(function() {
+                        $('#settings-result').fadeOut();
+                    }, 5000);
+                } else {
+                    $('#settings-result')
+                        .removeClass('success')
+                        .addClass('error')
+                        .html('<strong>❌</strong> ' + (response.data || 'Failed to save settings'))
+                        .show();
+                }
+            },
+            error: function(xhr, status, error) {
+                $('#settings-result')
+                    .removeClass('success')
+                    .addClass('error')
+                    .html('<strong>❌</strong> Error: ' + error)
+                    .show();
+            },
+            complete: function() {
+                button.prop('disabled', false).text('💾 Save Settings');
             }
-            progressFill.css('width', width + '%');
-        }, 500);
-        
-        // Store interval to clear it later
-        progressDiv.data('interval', interval);
-    }
-    
-    // Hide progress
-    function hideProgress() {
-        var progressDiv = $('#sync-progress');
-        var interval = progressDiv.data('interval');
-        
-        if (interval) {
-            clearInterval(interval);
-        }
-        
-        var progressFill = progressDiv.find('.progress-fill');
-        progressFill.css('width', '100%');
-        
-        setTimeout(function() {
-            progressDiv.removeClass('active').hide();
-            progressFill.css('width', '0%');
-        }, 1000);
-    }
-    
-    // Override the default AJAX complete handler to hide progress
-    $(document).ajaxComplete(function(event, xhr, settings) {
-        if (settings.data && settings.data.indexOf('elko_') !== -1) {
-            hideProgress();
-        }
+        });
     });
+    
+    // Price preview calculation
+    function updatePricePreview() {
+        var basePrice = parseFloat($('#price-preview-input').val()) || 100;
+        var tax = parseFloat($('input[name="elko_tax_percentage"]').val()) || 0;
+        var markup = parseFloat($('input[name="elko_markup_percentage"]').val()) || 0;
+        var method = $('select[name="elko_price_calculation_method"]').val();
+        var round = $('input[name="elko_round_prices"]').is(':checked');
+        
+        var finalPrice;
+        if (method === 'compound') {
+            finalPrice = basePrice * (1 + tax / 100) * (1 + markup / 100);
+        } else {
+            var taxAmount = basePrice * (tax / 100);
+            finalPrice = (basePrice + taxAmount) * (1 + markup / 100);
+        }
+        
+        if (round) {
+            finalPrice = Math.round(finalPrice * 100) / 100;
+        }
+        
+        $('#price-preview-result').text('€' + finalPrice.toFixed(2));
+        $('#price-preview-breakdown').html(
+            'Base: €' + basePrice.toFixed(2) + 
+            ' + Tax (' + tax + '%): €' + (basePrice * tax / 100).toFixed(2) + 
+            ' + Markup (' + markup + '%): = €' + finalPrice.toFixed(2)
+        );
+    }
+    
+    // Bind price preview updates
+    $('input[name="elko_tax_percentage"], input[name="elko_markup_percentage"], #price-preview-input').on('input change', updatePricePreview);
+    $('select[name="elko_price_calculation_method"]').on('change', updatePricePreview);
+    $('input[name="elko_round_prices"]').on('change', updatePricePreview);
+    
+    // Initial price preview
+    if ($('#price-preview-input').length) {
+        updatePricePreview();
+    }
     
     // Auto-refresh stats every 30 seconds
     setInterval(function() {
@@ -270,6 +428,5 @@ jQuery(document).ready(function($) {
         }
     }, 30000);
     
-    console.log('ELKO Admin JS fully initialized by MartinAbramov at 2025-10-21 14:19:42');
+    console.log('ELKO Admin JS fully initialized');
 });
-
