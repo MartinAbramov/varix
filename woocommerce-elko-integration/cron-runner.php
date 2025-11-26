@@ -11,6 +11,18 @@
  * /usr/bin/curl -s "https://your-site.ee/wp-content/plugins/woocommerce-elko-integration/cron-runner.php?key=YOUR_SECRET_KEY"
  */
 
+// Set unlimited execution time for long imports
+if (function_exists('set_time_limit')) {
+    @set_time_limit(0);
+}
+if (function_exists('ignore_user_abort')) {
+    @ignore_user_abort(true);
+}
+if (function_exists('ini_set')) {
+    @ini_set('memory_limit', '512M');
+    @ini_set('max_execution_time', '0');
+}
+
 // Prevent direct web access without secret key
 $secret_key = isset($_GET['key']) ? $_GET['key'] : '';
 $stored_key = '';

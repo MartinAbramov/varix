@@ -167,6 +167,19 @@ class ELKO_Product_Importer {
      * Import products with category selection and progress tracking
      */
     public function import_products($selected_categories = array(), $session_id = '') {
+        // Increase time limit for long-running imports
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(0);
+        }
+        if (function_exists('ignore_user_abort')) {
+            @ignore_user_abort(true);
+        }
+        
+        // Increase memory limit if possible
+        if (function_exists('ini_set')) {
+            @ini_set('memory_limit', '512M');
+        }
+        
         if ($this->should_stop()) {
             ELKO_Logger::log_sync('products', 'stopped', 'Import stopped due to stop flag');
             return false;
@@ -679,11 +692,14 @@ class ELKO_Product_Importer {
         $product_code = $product_data['code'] ?? '';
         $description = $product_data['description'] ?? '';
         $short_description = $product_data['shortDescription'] ?? '';
-        $manufacturer = $product_data['manufacturer'] ?? '';
+        // API uses vendorName, not manufacturer
+        $manufacturer = $product_data['vendorName'] ?? $product_data['manufacturer'] ?? '';
         $warranty = $product_data['warranty'] ?? '';
         $gallery = $product_data['gallery'] ?? array();
         $attributes = $product_data['attributes'] ?? array();
         $detailed_description = $product_data['detailed_description'] ?? array();
+        // Get manufacturerCode directly from API response first
+        $manufacturer_code = $product_data['manufacturerCode'] ?? '';
         
         $final_price = $this->price_calculator->calculate_price($elko_price);
         
@@ -703,8 +719,10 @@ class ELKO_Product_Importer {
         $enhanced_short_description = $this->build_short_description($detailed_description, $short_description);
         $product->set_short_description($enhanced_short_description);
         
-        // Use manufacturerCode as SKU
-        $manufacturer_code = $this->extract_manufacturer_code($detailed_description, $product_data);
+        // Use manufacturerCode as SKU - first from API, then from description criteria
+        if (empty($manufacturer_code)) {
+            $manufacturer_code = $this->extract_manufacturer_code($detailed_description, $product_data);
+        }
         $unique_sku = $this->get_unique_sku($manufacturer_code ?: $product_code, $elko_id);
         $product->set_sku($unique_sku);
         
@@ -801,12 +819,33 @@ class ELKO_Product_Importer {
                 $wc_product->set_short_description($enhanced_short_description);
             }
             
+            // Update SKU from manufacturerCode if current SKU is ELKO-format
+            $current_sku = $wc_product->get_sku();
+            if (strpos($current_sku, 'ELKO-') === 0) {
+                $manufacturer_code = $product_data['manufacturerCode'] ?? '';
+                if (empty($manufacturer_code)) {
+                    $manufacturer_code = $this->extract_manufacturer_code($detailed_description, $product_data);
+                }
+                if (!empty($manufacturer_code)) {
+                    $elko_id = $product_data['id'] ?? '';
+                    $new_sku = $this->get_unique_sku($manufacturer_code, $elko_id);
+                    $wc_product->set_sku($new_sku);
+                }
+            }
+            
             $wc_product->save();
             
             // Update meta
             update_post_meta($product_id, '_elko_original_price', $elko_price);
             update_post_meta($product_id, '_elko_final_price', $final_price);
             update_post_meta($product_id, '_elko_last_update', current_time('mysql'));
+            
+            // Update manufacturer/brand from vendorName
+            $manufacturer = $product_data['vendorName'] ?? $product_data['manufacturer'] ?? '';
+            if (!empty($manufacturer)) {
+                update_post_meta($product_id, '_elko_manufacturer', $manufacturer);
+                $this->assign_product_brand($product_id, $manufacturer);
+            }
             
             // Check if images exist, if not import them
             $thumbnail_id = get_post_thumbnail_id($product_id);
@@ -833,9 +872,15 @@ class ELKO_Product_Importer {
     }
     
     /**
-     * Extract manufacturer code from detailed description
+     * Extract manufacturer code from detailed description or API data
      */
     private function extract_manufacturer_code($detailed_description, $product_data) {
+        // First check if manufacturerCode is directly in product data
+        if (!empty($product_data['manufacturerCode'])) {
+            return trim($product_data['manufacturerCode']);
+        }
+        
+        // Then check in detailed description criteria
         if (isset($detailed_description['description']) && is_array($detailed_description['description'])) {
             foreach ($detailed_description['description'] as $criteria) {
                 if (!isset($criteria['criteria']) || !isset($criteria['value'])) {
@@ -845,12 +890,13 @@ class ELKO_Product_Importer {
                 $criteria_name = strtolower($criteria['criteria']);
                 $value = trim($criteria['value']);
                 
-                if (in_array($criteria_name, ['product model code', 'model code', 'part number', 'manufacturer part number', 'manufacturercode']) && !empty($value)) {
+                if (in_array($criteria_name, ['product model code', 'model code', 'part number', 'manufacturer part number', 'manufacturercode', 'manufacturer code']) && !empty($value)) {
                     return $value;
                 }
             }
         }
         
+        // Fallback to product code
         return $product_data['code'] ?? '';
     }
     
