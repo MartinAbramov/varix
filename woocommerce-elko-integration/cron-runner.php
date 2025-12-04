@@ -80,24 +80,45 @@ if ($is_cli && isset($argv[1])) {
     $action = $argv[1];
 }
 
+// Clear any previous stop flags before starting
+delete_option('elko_import_stop_requested');
+delete_option('elko_emergency_stop');
+delete_option('elko_force_stop');
+
 try {
     switch ($action) {
         case 'sync_products':
             echo "Starting product sync...\n";
+            echo "Categories to process: all defined categories\n";
             if (class_exists('ELKO_Product_Importer')) {
                 $importer = new ELKO_Product_Importer();
-                $result = $importer->import_products();
+                
+                // Get selected categories from URL parameter (optional)
+                $selected_categories = array();
+                if (isset($_GET['categories']) && !empty($_GET['categories'])) {
+                    $selected_categories = explode(',', sanitize_text_field($_GET['categories']));
+                    echo "Filtering by categories: " . implode(', ', $selected_categories) . "\n";
+                }
+                
+                $result = $importer->import_products($selected_categories);
                 
                 if ($result !== false) {
                     update_option('elko_last_product_sync', current_time('mysql'));
-                    echo "✅ Product sync completed. Imported: {$result} products\n";
+                    echo "✅ Product sync completed. Imported/Updated: {$result} products\n";
                     if (class_exists('ELKO_Logger')) {
                         ELKO_Logger::log_sync('cron-runner', 'success', "Product sync completed. Imported: {$result}");
                     }
                 } else {
-                    echo "❌ Product sync failed\n";
+                    echo "❌ Product sync failed or was stopped\n";
+                    // Check why it stopped
+                    if (get_option('elko_import_stop_requested', false)) {
+                        echo "⚠️ Reason: Stop was requested\n";
+                    }
+                    if (get_option('elko_emergency_stop', 0) > (time() - 300)) {
+                        echo "⚠️ Reason: Emergency stop was triggered\n";
+                    }
                     if (class_exists('ELKO_Logger')) {
-                        ELKO_Logger::log_sync('cron-runner', 'error', 'Product sync failed');
+                        ELKO_Logger::log_sync('cron-runner', 'error', 'Product sync failed or stopped');
                     }
                 }
             } else {

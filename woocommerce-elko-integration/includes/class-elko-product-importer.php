@@ -180,8 +180,11 @@ class ELKO_Product_Importer {
             @ini_set('memory_limit', '512M');
         }
         
+        // Clear stop flags at the beginning of a new import
+        delete_option('elko_import_stop_requested');
+        
         if ($this->should_stop()) {
-            ELKO_Logger::log_sync('products', 'stopped', 'Import stopped due to stop flag');
+            ELKO_Logger::log_sync('products', 'stopped', 'Import stopped due to stop flag (check elko_emergency_stop or elko_force_stop)');
             return false;
         }
         
@@ -200,6 +203,10 @@ class ELKO_Product_Importer {
                 return 0;
             }
             
+            // Log all categories that will be processed
+            $category_names = array_keys($categories);
+            ELKO_Logger::log_sync('products', 'info', "Categories to process: " . implode(', ', $category_names));
+            
             // Count total products first
             $total_products = $this->count_products_in_categories($categories);
             
@@ -209,29 +216,39 @@ class ELKO_Product_Importer {
             
             $imported_count = 0;
             $processed = 0;
+            $category_index = 0;
+            $total_categories = count($categories);
             
-            ELKO_Logger::log_sync('products', 'started', "Processing " . count($categories) . " categories with {$total_products} total products");
+            ELKO_Logger::log_sync('products', 'started', "Processing {$total_categories} categories with {$total_products} total products");
             
             foreach ($categories as $category_name => $category_code_id) {
+                $category_index++;
+                
                 if ($this->should_stop()) {
-                    ELKO_Logger::log_sync('products', 'stopped', "Import stopped at category: {$category_name}");
+                    ELKO_Logger::log_sync('products', 'stopped', "Import stopped at category {$category_index}/{$total_categories}: {$category_name}");
                     $this->complete_progress('stopped');
                     return $imported_count;
                 }
                 
+                ELKO_Logger::log_sync('products', 'info', "Processing category {$category_index}/{$total_categories}: {$category_name} (code: {$category_code_id})");
                 $this->update_progress("Loading category: {$category_name}");
                 
                 // Get products one by one with attributes
                 $products = $this->api_client->get_products_by_category($category_code_id);
                 
                 if (is_wp_error($products)) {
+                    ELKO_Logger::log_sync('products', 'error', "Error loading category {$category_name}: " . $products->get_error_message());
                     $this->update_progress("Error: " . $products->get_error_message(), null, $products->get_error_message());
                     continue;
                 }
                 
                 if (!is_array($products) || empty($products)) {
+                    ELKO_Logger::log_sync('products', 'info', "Category {$category_name} has no products, skipping");
                     continue;
                 }
+                
+                $products_in_category = count($products);
+                ELKO_Logger::log_sync('products', 'info', "Found {$products_in_category} products in category {$category_name}");
                 
                 foreach ($products as $product_data) {
                     if ($this->should_stop()) {
