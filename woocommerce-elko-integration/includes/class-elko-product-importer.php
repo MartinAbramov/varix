@@ -479,74 +479,253 @@ class ELKO_Product_Importer {
             
             $fixed_count = 0;
             $processed = 0;
+            $skipped_count = 0;
             
             ELKO_Logger::log_sync('images', 'started', "Fixing images for {$total} products" . ($resume_from > 0 ? " (resuming from #{$resume_from})" : ""));
             
-            // Process in batches of 20
-            $batches = array_chunk($elko_products, 20);
-            
-            foreach ($batches as $batch) {
+            // Process products one by one for better progress tracking
+            foreach ($elko_products as $product) {
                 if ($this->should_stop()) {
                     $this->complete_progress('stopped');
+                    ELKO_Logger::log_sync('images', 'stopped', "Stopped at {$processed}/{$total}. Fixed: {$fixed_count}, Skipped: {$skipped_count}");
                     return $fixed_count;
                 }
                 
-                $elko_ids = array_column($batch, 'elko_id');
+                $processed++;
                 
-                // Get media for batch
-                $media_response = $this->api_client->get_product_media($elko_ids);
-                
-                if (is_wp_error($media_response)) {
+                // Skip items if resuming
+                if ($resume_from > 0 && $processed <= $resume_from) {
                     continue;
                 }
                 
-                // Index media by product ID
-                $media_by_id = array();
-                if (is_array($media_response)) {
-                    foreach ($media_response as $media_item) {
-                        if (isset($media_item['id'])) {
-                            $media_by_id[$media_item['id']] = $media_item['mediaFiles'] ?? array();
-                        }
-                    }
-                }
+                $product_title = get_the_title($product->post_id);
+                $elko_id = $product->elko_id;
                 
-                // Update each product's images
-                foreach ($batch as $product) {
-                    if ($this->should_stop()) {
-                        $this->complete_progress('stopped');
-                        return $fixed_count;
-                    }
+                // Update progress with product name BEFORE processing
+                $this->update_progress("🖼️ [{$processed}/{$total}] {$product_title} (ELKO: {$elko_id})", $processed);
+                
+                // First, clean up any broken images (images that don't exist on disk)
+                $this->cleanup_broken_images($product->post_id);
+                
+                // Get media for this product
+                try {
+                    $media_response = $this->api_client->get_product_media(array($elko_id));
                     
-                    $processed++;
-                    
-                    // Skip items if resuming
-                    if ($resume_from > 0 && $processed <= $resume_from) {
+                    if (is_wp_error($media_response)) {
+                        ELKO_Logger::log_sync('images', 'warning', "API error for {$product_title}: " . $media_response->get_error_message());
+                        $skipped_count++;
                         continue;
                     }
                     
-                    $product_title = get_the_title($product->post_id);
-                    $this->update_progress($product_title, $processed);
+                    // Find media for this product
+                    $product_media = null;
+                    if (is_array($media_response)) {
+                        foreach ($media_response as $media_item) {
+                            if (isset($media_item['id']) && $media_item['id'] == $elko_id) {
+                                $product_media = $media_item['mediaFiles'] ?? array();
+                                break;
+                            }
+                        }
+                    }
                     
-                    if (isset($media_by_id[$product->elko_id]) && !empty($media_by_id[$product->elko_id])) {
+                    if (!empty($product_media)) {
                         // Delete existing attachments
                         $this->delete_product_attachments($product->post_id);
                         
-                        // Import new images
-                        $this->import_enhanced_gallery($product->post_id, $media_by_id[$product->elko_id]);
+                        // Import new images with timeout protection
+                        $this->import_enhanced_gallery_safe($product->post_id, $product_media);
                         $fixed_count++;
+                        
+                        $this->update_progress("✅ [{$processed}/{$total}] {$product_title} - images updated", $processed);
+                    } else {
+                        $skipped_count++;
                     }
+                } catch (Exception $e) {
+                    ELKO_Logger::log_sync('images', 'warning', "Error fixing {$product_title}: " . $e->getMessage());
+                    $skipped_count++;
                 }
                 
-                usleep(300000); // 0.3 second delay between batches
+                // Short delay between products
+                usleep(100000); // 0.1 second
             }
             
             $this->complete_progress('completed');
-            ELKO_Logger::log_sync('images', 'success', "Fixed images for {$fixed_count} products");
+            ELKO_Logger::log_sync('images', 'success', "Fixed images: {$fixed_count} products, Skipped: {$skipped_count}");
             return $fixed_count;
             
         } catch (Exception $e) {
             ELKO_Logger::log_sync('images', 'error', 'Image fix failed: ' . $e->getMessage());
             $this->complete_progress('error');
+            return false;
+        }
+    }
+    
+    /**
+     * Clean up broken images (images that don't exist on disk)
+     */
+    private function cleanup_broken_images($product_id) {
+        // Check thumbnail
+        $thumbnail_id = get_post_thumbnail_id($product_id);
+        if ($thumbnail_id) {
+            $file_path = get_attached_file($thumbnail_id);
+            if (empty($file_path) || !file_exists($file_path)) {
+                wp_delete_attachment($thumbnail_id, true);
+                delete_post_thumbnail($product_id);
+            }
+        }
+        
+        // Check gallery images
+        $gallery_ids = get_post_meta($product_id, '_product_image_gallery', true);
+        if (!empty($gallery_ids)) {
+            $ids = explode(',', $gallery_ids);
+            $valid_ids = array();
+            
+            foreach ($ids as $id) {
+                $id = intval($id);
+                if ($id > 0) {
+                    $file_path = get_attached_file($id);
+                    if (!empty($file_path) && file_exists($file_path)) {
+                        $valid_ids[] = $id;
+                    } else {
+                        wp_delete_attachment($id, true);
+                    }
+                }
+            }
+            
+            if (count($valid_ids) !== count($ids)) {
+                update_post_meta($product_id, '_product_image_gallery', implode(',', $valid_ids));
+            }
+        }
+    }
+    
+    /**
+     * Import gallery with timeout protection per image
+     */
+    private function import_enhanced_gallery_safe($product_id, $gallery) {
+        if (empty($gallery) || !is_array($gallery)) {
+            return;
+        }
+        
+        $attachment_ids = array();
+        $max_images = 10; // Limit images per product
+        $image_count = 0;
+        
+        foreach ($gallery as $index => $media_item) {
+            if ($image_count >= $max_images) {
+                break;
+            }
+            
+            if (!isset($media_item['link'])) {
+                continue;
+            }
+            
+            $image_url = $media_item['link'];
+            $sequence = $media_item['sequence'] ?? $index;
+            
+            // Import with shorter timeout
+            $attachment_id = $this->import_image_from_url_safe($image_url, $product_id);
+            
+            if ($attachment_id) {
+                $attachment_ids[] = array(
+                    'id' => $attachment_id,
+                    'sequence' => $sequence
+                );
+                $image_count++;
+            }
+        }
+        
+        if (!empty($attachment_ids)) {
+            usort($attachment_ids, function($a, $b) {
+                return $a['sequence'] <=> $b['sequence'];
+            });
+            
+            $sorted_ids = array_column($attachment_ids, 'id');
+            
+            set_post_thumbnail($product_id, $sorted_ids[0]);
+            
+            if (count($sorted_ids) > 1) {
+                $gallery_ids = array_slice($sorted_ids, 1);
+                update_post_meta($product_id, '_product_image_gallery', implode(',', $gallery_ids));
+            }
+        }
+    }
+    
+    /**
+     * Import image with shorter timeout and error handling
+     */
+    private function import_image_from_url_safe($image_url, $product_id) {
+        try {
+            $existing_attachment = $this->get_attachment_by_url($image_url);
+            if ($existing_attachment) {
+                // Verify the attachment file exists
+                $file_path = get_attached_file($existing_attachment);
+                if (!empty($file_path) && file_exists($file_path)) {
+                    return $existing_attachment;
+                }
+                // File doesn't exist, delete the broken attachment
+                wp_delete_attachment($existing_attachment, true);
+            }
+            
+            $upload_dir = wp_upload_dir();
+            $image_data = wp_remote_get($image_url, array(
+                'timeout' => 15, // Shorter timeout
+                'user-agent' => 'WooCommerce-ELKO-Integration/' . ELKO_PLUGIN_VERSION
+            ));
+            
+            if (is_wp_error($image_data)) {
+                return false;
+            }
+            
+            $response_code = wp_remote_retrieve_response_code($image_data);
+            if ($response_code !== 200) {
+                return false;
+            }
+            
+            $image_content = wp_remote_retrieve_body($image_data);
+            if (empty($image_content) || strlen($image_content) < 1000) { // Minimum 1KB for valid image
+                return false;
+            }
+            
+            $filename = basename(parse_url($image_url, PHP_URL_PATH));
+            if (empty($filename) || strpos($filename, '.') === false) {
+                $filename = 'elko-image-' . time() . '.jpg';
+            }
+            
+            $filename = wp_unique_filename($upload_dir['path'], $filename);
+            
+            if (wp_mkdir_p($upload_dir['path'])) {
+                $file = $upload_dir['path'] . '/' . $filename;
+            } else {
+                $file = $upload_dir['basedir'] . '/' . $filename;
+            }
+            
+            $file_written = file_put_contents($file, $image_content);
+            if ($file_written === false) {
+                return false;
+            }
+            
+            $wp_filetype = wp_check_filetype($filename);
+            $attachment = array(
+                'post_mime_type' => $wp_filetype['type'],
+                'post_title' => sanitize_file_name($filename),
+                'post_content' => '',
+                'post_status' => 'inherit'
+            );
+            
+            $attach_id = wp_insert_attachment($attachment, $file, $product_id);
+            if (!is_wp_error($attach_id)) {
+                require_once(ABSPATH . 'wp-admin/includes/image.php');
+                $attach_data = wp_generate_attachment_metadata($attach_id, $file);
+                wp_update_attachment_metadata($attach_id, $attach_data);
+                
+                // Store original URL for deduplication
+                update_post_meta($attach_id, '_elko_source_url', $image_url);
+                
+                return $attach_id;
+            }
+            
+            return false;
+        } catch (Exception $e) {
             return false;
         }
     }
