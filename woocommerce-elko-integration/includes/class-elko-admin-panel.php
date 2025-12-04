@@ -684,15 +684,22 @@ class ELKO_Admin_Panel {
             delete_option('elko_import_stop_requested');
             
             $session_id = isset($_POST['session_id']) ? sanitize_text_field($_POST['session_id']) : wp_generate_uuid4();
+            $categories = array();
+            
+            if (!empty($_POST['categories']) && is_array($_POST['categories'])) {
+                $categories = array_map('sanitize_text_field', $_POST['categories']);
+            }
             
             $importer = new ELKO_Product_Importer();
-            $result = $importer->fix_all_images($session_id);
+            $result = $importer->fix_all_images($session_id, $categories);
+            
+            $category_msg = !empty($categories) ? " (from " . count($categories) . " selected categories)" : " (all categories)";
             
             if ($result !== false && $result > 0) {
-                ELKO_Logger::log_sync('images', 'success', "Fixed images for {$result} products");
-                wp_send_json_success("✅ Successfully re-imported images for {$result} products!");
+                ELKO_Logger::log_sync('images', 'success', "Fixed images for {$result} products" . $category_msg);
+                wp_send_json_success("✅ Successfully re-imported images for {$result} products" . $category_msg . "!");
             } elseif ($result === 0) {
-                wp_send_json_success("✅ No products found with missing images.");
+                wp_send_json_success("✅ No products found with missing images" . $category_msg . ".");
             } else {
                 wp_send_json_error('❌ Image fix failed.');
             }
@@ -1054,7 +1061,8 @@ class ELKO_Admin_Panel {
         <!-- CATEGORY SELECTION -->
         <div class="elko-sync-controls">
             <h3><?php esc_html_e('📁 Category Selection for Import', 'woocommerce-elko-integration'); ?></h3>
-            <p><?php esc_html_e('Select categories to import. Leave empty to import all allowed categories.', 'woocommerce-elko-integration'); ?></p>
+            <p><?php esc_html_e('Select categories to import. Leave empty to process all categories.', 'woocommerce-elko-integration'); ?></p>
+            <p style="color: #666; font-size: 12px;"><strong>ℹ️ Note:</strong> <?php esc_html_e('This selection affects: Sync Products, Fix Images, Import Attributes, and Update Prices.', 'woocommerce-elko-integration'); ?></p>
             
             <div class="elko-category-select" style="margin: 15px 0;">
                 <select id="import-categories" multiple style="width: 100%; min-height: 200px;">

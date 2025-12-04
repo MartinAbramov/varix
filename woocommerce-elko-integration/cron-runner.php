@@ -194,12 +194,14 @@ try {
             echo "Starting image fix...\n";
             if (class_exists('ELKO_Product_Importer')) {
                 $importer = new ELKO_Product_Importer();
-                $result = $importer->fix_all_images($session_id);
+                $category_msg = !empty($categories) ? "from " . count($categories) . " selected categories" : "from all categories";
+                echo "Processing products {$category_msg}...\n";
+                $result = $importer->fix_all_images($session_id, $categories);
                 
                 if ($result !== false) {
-                    echo "✅ Image fix completed. Fixed: {$result} products\n";
+                    echo "✅ Image fix completed. Fixed: {$result} products {$category_msg}\n";
                     if (class_exists('ELKO_Logger')) {
-                        ELKO_Logger::log_sync('cron-runner', 'success', "Image fix completed. Fixed: {$result}");
+                        ELKO_Logger::log_sync('cron-runner', 'success', "Image fix completed. Fixed: {$result} {$category_msg}");
                     }
                 } else {
                     echo "❌ Image fix failed\n";

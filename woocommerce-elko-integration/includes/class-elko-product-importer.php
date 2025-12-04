@@ -426,7 +426,7 @@ class ELKO_Product_Importer {
     /**
      * Fix all images - re-import gallery for existing products
      */
-    public function fix_all_images($session_id = '') {
+    public function fix_all_images($session_id = '', $categories = array()) {
         if ($this->should_stop()) {
             return false;
         }
@@ -434,10 +434,15 @@ class ELKO_Product_Importer {
         try {
             global $wpdb;
             
-            // Get all products with ELKO IDs
-            $elko_products = $wpdb->get_results(
-                "SELECT post_id, meta_value as elko_id FROM {$wpdb->postmeta} WHERE meta_key = '_elko_product_id'"
-            );
+            // If categories are specified, get only products from those categories
+            if (!empty($categories)) {
+                $elko_products = $this->get_products_by_elko_categories($categories);
+            } else {
+                // Get all products with ELKO IDs
+                $elko_products = $wpdb->get_results(
+                    "SELECT post_id, meta_value as elko_id FROM {$wpdb->postmeta} WHERE meta_key = '_elko_product_id'"
+                );
+            }
             
             if (empty($elko_products)) {
                 return 0;
@@ -536,6 +541,38 @@ class ELKO_Product_Importer {
         
         delete_post_thumbnail($product_id);
         delete_post_meta($product_id, '_product_image_gallery');
+    }
+    
+    /**
+     * Get products by ELKO categories
+     * Returns products that have an _elko_category_code meta matching the given categories
+     */
+    private function get_products_by_elko_categories($categories) {
+        global $wpdb;
+        
+        if (empty($categories)) {
+            return array();
+        }
+        
+        // Prepare placeholders for the IN clause
+        $placeholders = implode(',', array_fill(0, count($categories), '%s'));
+        
+        // Get products that have the specified ELKO category codes
+        $query = $wpdb->prepare(
+            "SELECT DISTINCT pm1.post_id, pm1.meta_value as elko_id 
+             FROM {$wpdb->postmeta} pm1
+             INNER JOIN {$wpdb->postmeta} pm2 ON pm1.post_id = pm2.post_id
+             WHERE pm1.meta_key = '_elko_product_id'
+             AND pm2.meta_key = '_elko_category_code'
+             AND pm2.meta_value IN ({$placeholders})",
+            ...$categories
+        );
+        
+        $products = $wpdb->get_results($query);
+        
+        ELKO_Logger::log_sync('images', 'info', "Found " . count($products) . " products in " . count($categories) . " selected categories");
+        
+        return $products;
     }
     
     /**

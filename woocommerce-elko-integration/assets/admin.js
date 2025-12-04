@@ -407,16 +407,23 @@ jQuery(document).ready(function($) {
         startBackgroundJob('update_prices', {}, $(this));
     });
     
-    // Fix Images - uses background job
+    // Fix Images - uses background job with category selection
     $('#fix-images').on('click', function(e) {
         e.preventDefault();
         
-        if (!confirm('Re-import all product images in BACKGROUND? This will delete existing images and download fresh ones from ELKO.\n\n🔄 You can close this page - the import will continue!')) {
+        var selectedCategories = getSelectedCategories();
+        var categoryMsg = selectedCategories.length > 0 
+            ? 'Re-import images for products in ' + selectedCategories.length + ' selected categories in BACKGROUND?'
+            : 'Re-import images for ALL products in BACKGROUND? This may take a while.';
+        
+        categoryMsg += '\n\nThis will delete existing images and download fresh ones from ELKO.\n\n🔄 You can close this page - the import will continue!';
+        
+        if (!confirm(categoryMsg)) {
             return;
         }
         
         generateSessionId();
-        startBackgroundJob('fix_images', {}, $(this));
+        startBackgroundJob('fix_images', { categories: selectedCategories }, $(this));
     });
     
     // Refresh Categories List
