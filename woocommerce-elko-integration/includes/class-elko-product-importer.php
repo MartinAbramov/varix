@@ -1,6 +1,6 @@
 <?php
 /**
- * ELKO Product Importer - Fixed gallery, attributes, codes, brands and publishing
+ * ELKO Product Importer - Enhanced with progress tracking, stop support, and manufacturerCode as SKU
  */
 
 if (!defined('ABSPATH')) {
@@ -11,190 +11,895 @@ class ELKO_Product_Importer {
     
     private $api_client;
     private $price_calculator;
+    private $session_id;
+    private $progress_table;
     
     public function __construct() {
+        global $wpdb;
         $this->api_client = new ELKO_API_Client();
         $this->price_calculator = new ELKO_Price_Calculator();
+        $this->progress_table = $wpdb->prefix . 'elko_import_progress';
     }
     
     /**
-     * Import products from specific 3rd level categories with name cleaning
+     * Check if import should stop
      */
-    public function import_products() {
-        // Check for emergency stop
+    private function should_stop() {
+        // Check emergency stop
         if (get_option('elko_emergency_stop', 0) > (time() - 300)) {
-            error_log("ELKO: Import stopped due to emergency stop");
-            return false;
+            return true;
         }
         
-        // Check for force stop flag
+        // Check force stop
         if (get_option('elko_force_stop', 0) > (time() - 60)) {
-            error_log("ELKO: Import stopped due to force stop");
+            return true;
+        }
+        
+        // Check graceful stop request
+        if (get_option('elko_import_stop_requested', false)) {
+            return true;
+        }
+        
+        // Check session-specific stop
+        if (!empty($this->session_id) && get_option('elko_stop_session_' . $this->session_id, false)) {
+            return true;
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Initialize progress tracking
+     */
+    private function init_progress($import_type, $total_items, $session_id) {
+        global $wpdb;
+        
+        $this->session_id = $session_id;
+        
+        // Ensure table exists
+        $this->ensure_progress_table();
+        
+        $wpdb->insert(
+            $this->progress_table,
+            array(
+                'import_type' => $import_type,
+                'session_id' => $session_id,
+                'total_items' => $total_items,
+                'processed_items' => 0,
+                'current_item' => '',
+                'status' => 'running',
+                'started_at' => current_time('mysql')
+            ),
+            array('%s', '%s', '%d', '%d', '%s', '%s', '%s')
+        );
+    }
+    
+    /**
+     * Ensure progress table exists
+     */
+    private function ensure_progress_table() {
+        global $wpdb;
+        
+        $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$this->progress_table}'") == $this->progress_table;
+        
+        if (!$table_exists) {
+            $charset_collate = $wpdb->get_charset_collate();
+            $sql = "CREATE TABLE {$this->progress_table} (
+                id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+                import_type varchar(50) NOT NULL,
+                session_id varchar(64) NOT NULL,
+                total_items int(11) NOT NULL DEFAULT 0,
+                processed_items int(11) NOT NULL DEFAULT 0,
+                current_item varchar(255) DEFAULT NULL,
+                status varchar(20) NOT NULL DEFAULT 'running',
+                started_at datetime DEFAULT CURRENT_TIMESTAMP,
+                updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                completed_at datetime DEFAULT NULL,
+                error_count int(11) NOT NULL DEFAULT 0,
+                last_error text,
+                PRIMARY KEY (id),
+                KEY session_id (session_id)
+            ) $charset_collate;";
+            
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta($sql);
+        }
+    }
+    
+    /**
+     * Update progress
+     */
+    private function update_progress($current_item, $processed = null, $error = null) {
+        global $wpdb;
+        
+        if (empty($this->session_id)) {
+            return;
+        }
+        
+        $update_data = array(
+            'current_item' => $current_item,
+            'updated_at' => current_time('mysql')
+        );
+        
+        if ($processed !== null) {
+            $update_data['processed_items'] = $processed;
+        }
+        
+        if ($error !== null) {
+            $wpdb->query($wpdb->prepare(
+                "UPDATE {$this->progress_table} SET error_count = error_count + 1, last_error = %s WHERE session_id = %s",
+                $error,
+                $this->session_id
+            ));
+        }
+        
+        $wpdb->update(
+            $this->progress_table,
+            $update_data,
+            array('session_id' => $this->session_id)
+        );
+    }
+    
+    /**
+     * Complete progress
+     */
+    private function complete_progress($status = 'completed') {
+        global $wpdb;
+        
+        if (empty($this->session_id)) {
+            return;
+        }
+        
+        $wpdb->update(
+            $this->progress_table,
+            array(
+                'status' => $status,
+                'completed_at' => current_time('mysql')
+            ),
+            array('session_id' => $this->session_id)
+        );
+        
+        // Clean up session-specific stop flag
+        delete_option('elko_stop_session_' . $this->session_id);
+    }
+    
+    /**
+     * Import products with category selection and progress tracking
+     */
+    public function import_products($selected_categories = array(), $session_id = '', $resume_from = 0) {
+        // Increase time limit for long-running imports
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(0);
+        }
+        if (function_exists('ignore_user_abort')) {
+            @ignore_user_abort(true);
+        }
+        
+        // Increase memory limit if possible
+        if (function_exists('ini_set')) {
+            @ini_set('memory_limit', '512M');
+        }
+        
+        // Clear stop flags at the beginning of a new import (unless resuming)
+        if ($resume_from == 0) {
+            delete_option('elko_import_stop_requested');
+        }
+        
+        if ($this->should_stop()) {
+            ELKO_Logger::log_sync('products', 'stopped', 'Import stopped due to stop flag (check elko_emergency_stop or elko_force_stop)');
             return false;
         }
         
         try {
+            $categories = $this->get_third_level_categories();
+            
+            // Filter categories if selection provided
+            if (!empty($selected_categories)) {
+                $categories = array_filter($categories, function($code) use ($selected_categories) {
+                    return in_array($code, $selected_categories);
+                });
+            }
+            
+            if (empty($categories)) {
+                ELKO_Logger::log_sync('products', 'info', 'No categories selected for import');
+                return 0;
+            }
+            
+            // Log all categories that will be processed
+            $category_names = array_keys($categories);
+            ELKO_Logger::log_sync('products', 'info', "Categories to process: " . implode(', ', $category_names));
+            
+            // Count total products first
+            $total_products = $this->count_products_in_categories($categories);
+            
+            // Only init progress if not resuming
+            if (!empty($session_id) && $resume_from == 0) {
+                $this->init_progress('products', $total_products, $session_id);
+            } elseif (!empty($session_id)) {
+                $this->session_id = $session_id;
+            }
+            
             $imported_count = 0;
-            $allowed_categories = $this->get_third_level_categories();
+            $processed = 0;
+            $category_index = 0;
+            $total_categories = count($categories);
             
-            error_log("ELKO: Processing " . count($allowed_categories) . " third-level categories at 2025-10-21 14:03:14");
+            ELKO_Logger::log_sync('products', 'started', "Processing {$total_categories} categories with {$total_products} total products");
             
-            // Import products for each 3rd level category
-            foreach ($allowed_categories as $category_name => $category_code_id) {
-                error_log("ELKO: Processing category: {$category_name} ({$category_code_id})");
+            foreach ($categories as $category_name => $category_code_id) {
+                $category_index++;
                 
-                // Get products with full details (descriptions + media)
-                $products = $this->api_client->get_products_with_details($category_code_id, 'EE');
+                if ($this->should_stop()) {
+                    ELKO_Logger::log_sync('products', 'stopped', "Import stopped at category {$category_index}/{$total_categories}: {$category_name}");
+                    $this->complete_progress('stopped');
+                    return $imported_count;
+                }
+                
+                ELKO_Logger::log_sync('products', 'info', "Processing category {$category_index}/{$total_categories}: {$category_name} (code: {$category_code_id})");
+                $this->update_progress("Loading category: {$category_name}");
+                
+                // Get products one by one with attributes
+                $products = $this->api_client->get_products_by_category($category_code_id);
                 
                 if (is_wp_error($products)) {
-                    error_log("ELKO: Failed to get products for category {$category_name}: " . $products->get_error_message());
+                    ELKO_Logger::log_sync('products', 'error', "Error loading category {$category_name}: " . $products->get_error_message());
+                    $this->update_progress("Error: " . $products->get_error_message(), null, $products->get_error_message());
                     continue;
                 }
                 
                 if (!is_array($products) || empty($products)) {
-                    error_log("ELKO: No products found for category {$category_name}");
+                    ELKO_Logger::log_sync('products', 'info', "Category {$category_name} has no products, skipping");
                     continue;
                 }
                 
-                error_log("ELKO: Found " . count($products) . " products in category {$category_name}");
-                
-                // Clean product names in batch
-                $this->clean_product_names($products);
+                $products_in_category = count($products);
+                ELKO_Logger::log_sync('products', 'info', "Found {$products_in_category} products in category {$category_name}");
                 
                 foreach ($products as $product_data) {
-                    // Check for stop flags during processing
-                    if (get_option('elko_emergency_stop', 0) > (time() - 300) || 
-                        get_option('elko_force_stop', 0) > (time() - 60)) {
-                        error_log("ELKO: Import stopped during processing");
+                    if ($this->should_stop()) {
+                        ELKO_Logger::log_sync('products', 'stopped', "Import stopped during processing");
+                        $this->complete_progress('stopped');
                         return $imported_count;
                     }
+                    
+                    $product_name = $product_data['name'] ?? 'Unknown Product';
+                    $processed++;
+                    
+                    // Skip items if resuming
+                    if ($resume_from > 0 && $processed <= $resume_from) {
+                        $this->update_progress("Skipping (resumed) #{$processed}: {$product_name}", $processed);
+                        continue;
+                    }
+                    
+                    $this->update_progress($product_name, $processed);
+                    
+                    // Get product attributes separately
+                    if (isset($product_data['id'])) {
+                        $descriptions = $this->api_client->get_product_descriptions($product_data['id'], 'EE');
+                        if (!is_wp_error($descriptions) && is_array($descriptions)) {
+                            foreach ($descriptions as $desc) {
+                                if (isset($desc['productId']) && $desc['productId'] == $product_data['id']) {
+                                    $product_data['detailed_description'] = $desc;
+                                    $product_data['attributes'] = $this->parse_product_attributes($desc);
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        // Get product media
+                        $media = $this->api_client->get_product_media($product_data['id']);
+                        if (!is_wp_error($media) && is_array($media)) {
+                            foreach ($media as $media_item) {
+                                if (isset($media_item['id']) && $media_item['id'] == $product_data['id']) {
+                                    $product_data['gallery'] = $media_item['mediaFiles'] ?? array();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Clean product name
+                    $product_data['name'] = $this->clean_product_name($product_data['name']);
                     
                     if ($this->import_single_product($product_data, $category_name)) {
                         $imported_count++;
                     }
                     
-                    // Small delay to prevent overwhelming the server
-                    usleep(150000); // 0.15 second
+                    usleep(100000); // 0.1 second delay
                 }
             }
             
-            error_log("ELKO: Successfully imported {$imported_count} products with cleaned names by MartinAbramov");
+            $this->complete_progress('completed');
+            ELKO_Logger::log_sync('products', 'success', "Successfully imported {$imported_count} products");
             return $imported_count;
             
         } catch (Exception $e) {
-            error_log("ELKO: Enhanced product import failed: " . $e->getMessage());
+            ELKO_Logger::log_sync('products', 'error', 'Product import failed: ' . $e->getMessage());
+            $this->complete_progress('error');
             return false;
         }
     }
     
     /**
-     * Clean product names according to your rules
+     * Import attributes only for existing products
      */
-    private function clean_product_names(&$products) {
+    public function import_attributes_only($session_id = '', $resume_from = 0) {
+        if ($this->should_stop()) {
+            return false;
+        }
+        
+        try {
+            global $wpdb;
+            
+            // Get all products with ELKO IDs
+            $elko_products = $wpdb->get_results(
+                "SELECT post_id, meta_value as elko_id FROM {$wpdb->postmeta} WHERE meta_key = '_elko_product_id'"
+            );
+            
+            if (empty($elko_products)) {
+                return 0;
+            }
+            
+            $total = count($elko_products);
+            
+            // Only init progress if not resuming
+            if (!empty($session_id) && $resume_from == 0) {
+                $this->init_progress('attributes', $total, $session_id);
+            } elseif (!empty($session_id)) {
+                $this->session_id = $session_id;
+            }
+            
+            $updated_count = 0;
+            $processed = 0;
+            
+            ELKO_Logger::log_sync('attributes', 'started', "Updating attributes for {$total} products" . ($resume_from > 0 ? " (resuming from #{$resume_from})" : ""));
+            
+            // Process in batches of 20
+            $batches = array_chunk($elko_products, 20);
+            
+            foreach ($batches as $batch) {
+                if ($this->should_stop()) {
+                    $this->complete_progress('stopped');
+                    return $updated_count;
+                }
+                
+                $elko_ids = array_column($batch, 'elko_id');
+                
+                // Get descriptions for batch
+                $descriptions = $this->api_client->get_product_descriptions($elko_ids, 'EE');
+                
+                if (is_wp_error($descriptions)) {
+                    continue;
+                }
+                
+                // Index descriptions by product ID
+                $desc_by_id = array();
+                if (is_array($descriptions)) {
+                    foreach ($descriptions as $desc) {
+                        if (isset($desc['productId'])) {
+                            $desc_by_id[$desc['productId']] = $desc;
+                        }
+                    }
+                }
+                
+                // Update each product
+                foreach ($batch as $product) {
+                    if ($this->should_stop()) {
+                        $this->complete_progress('stopped');
+                        return $updated_count;
+                    }
+                    
+                    $processed++;
+                    
+                    // Skip items if resuming
+                    if ($resume_from > 0 && $processed <= $resume_from) {
+                        continue;
+                    }
+                    
+                    $product_title = get_the_title($product->post_id);
+                    $this->update_progress($product_title, $processed);
+                    
+                    if (isset($desc_by_id[$product->elko_id])) {
+                        $attributes = $this->parse_product_attributes($desc_by_id[$product->elko_id]);
+                        
+                        // Get existing attributes and merge
+                        $existing_attrs = get_post_meta($product->post_id, '_product_attributes', true);
+                        if (!is_array($existing_attrs)) {
+                            $existing_attrs = array();
+                        }
+                        
+                        $merged_attrs = array_merge($existing_attrs, $attributes);
+                        update_post_meta($product->post_id, '_product_attributes', $merged_attrs);
+                        
+                        // Also update manufacturer code as SKU if found
+                        $manufacturer_code = $this->extract_manufacturer_code($desc_by_id[$product->elko_id], array());
+                        if (!empty($manufacturer_code)) {
+                            $wc_product = wc_get_product($product->post_id);
+                            if ($wc_product) {
+                                $current_sku = $wc_product->get_sku();
+                                if (empty($current_sku) || strpos($current_sku, 'ELKO-') === 0) {
+                                    $unique_sku = $this->get_unique_sku($manufacturer_code, $product->elko_id);
+                                    $wc_product->set_sku($unique_sku);
+                                    $wc_product->save();
+                                }
+                            }
+                        }
+                        
+                        $updated_count++;
+                    }
+                }
+                
+                usleep(200000); // 0.2 second delay between batches
+            }
+            
+            $this->complete_progress('completed');
+            ELKO_Logger::log_sync('attributes', 'success', "Updated attributes for {$updated_count} products");
+            return $updated_count;
+            
+        } catch (Exception $e) {
+            ELKO_Logger::log_sync('attributes', 'error', 'Attribute import failed: ' . $e->getMessage());
+            $this->complete_progress('error');
+            return false;
+        }
+    }
+    
+    /**
+     * Fix all images - re-import gallery for existing products
+     */
+    public function fix_all_images($session_id = '', $categories = array(), $resume_from = 0) {
+        if ($this->should_stop()) {
+            return false;
+        }
+        
+        try {
+            global $wpdb;
+            
+            // If categories are specified, get only products from those categories
+            if (!empty($categories)) {
+                $elko_products = $this->get_products_by_elko_categories($categories);
+            } else {
+                // Get all products with ELKO IDs
+                $elko_products = $wpdb->get_results(
+                    "SELECT post_id, meta_value as elko_id FROM {$wpdb->postmeta} WHERE meta_key = '_elko_product_id'"
+                );
+            }
+            
+            if (empty($elko_products)) {
+                return 0;
+            }
+            
+            $total = count($elko_products);
+            
+            // Only init progress if not resuming
+            if (!empty($session_id) && $resume_from == 0) {
+                $this->init_progress('images', $total, $session_id);
+            } elseif (!empty($session_id)) {
+                $this->session_id = $session_id;
+            }
+            
+            $fixed_count = 0;
+            $processed = 0;
+            $skipped_count = 0;
+            
+            ELKO_Logger::log_sync('images', 'started', "Fixing images for {$total} products" . ($resume_from > 0 ? " (resuming from #{$resume_from})" : ""));
+            
+            // Process products one by one for better progress tracking
+            foreach ($elko_products as $product) {
+                if ($this->should_stop()) {
+                    $this->complete_progress('stopped');
+                    ELKO_Logger::log_sync('images', 'stopped', "Stopped at {$processed}/{$total}. Fixed: {$fixed_count}, Skipped: {$skipped_count}");
+                    return $fixed_count;
+                }
+                
+                $processed++;
+                
+                // Skip items if resuming
+                if ($resume_from > 0 && $processed <= $resume_from) {
+                    continue;
+                }
+                
+                $product_title = get_the_title($product->post_id);
+                $elko_id = $product->elko_id;
+                
+                // Update progress with product name BEFORE processing
+                $this->update_progress("🖼️ [{$processed}/{$total}] {$product_title} (ELKO: {$elko_id})", $processed);
+                
+                // First, clean up any broken images (images that don't exist on disk)
+                $this->cleanup_broken_images($product->post_id);
+                
+                // Get media for this product
+                try {
+                    $media_response = $this->api_client->get_product_media(array($elko_id));
+                    
+                    if (is_wp_error($media_response)) {
+                        ELKO_Logger::log_sync('images', 'warning', "API error for {$product_title}: " . $media_response->get_error_message());
+                        $skipped_count++;
+                        continue;
+                    }
+                    
+                    // Find media for this product
+                    $product_media = null;
+                    if (is_array($media_response)) {
+                        foreach ($media_response as $media_item) {
+                            if (isset($media_item['id']) && $media_item['id'] == $elko_id) {
+                                $product_media = $media_item['mediaFiles'] ?? array();
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (!empty($product_media)) {
+                        // Delete existing attachments
+                        $this->delete_product_attachments($product->post_id);
+                        
+                        // Import new images with timeout protection
+                        $this->import_enhanced_gallery_safe($product->post_id, $product_media);
+                        $fixed_count++;
+                        
+                        $this->update_progress("✅ [{$processed}/{$total}] {$product_title} - images updated", $processed);
+                    } else {
+                        $skipped_count++;
+                    }
+                } catch (Exception $e) {
+                    ELKO_Logger::log_sync('images', 'warning', "Error fixing {$product_title}: " . $e->getMessage());
+                    $skipped_count++;
+                }
+                
+                // Short delay between products
+                usleep(100000); // 0.1 second
+            }
+            
+            $this->complete_progress('completed');
+            ELKO_Logger::log_sync('images', 'success', "Fixed images: {$fixed_count} products, Skipped: {$skipped_count}");
+            return $fixed_count;
+            
+        } catch (Exception $e) {
+            ELKO_Logger::log_sync('images', 'error', 'Image fix failed: ' . $e->getMessage());
+            $this->complete_progress('error');
+            return false;
+        }
+    }
+    
+    /**
+     * Clean up broken images (images that don't exist on disk)
+     */
+    private function cleanup_broken_images($product_id) {
+        // Check thumbnail
+        $thumbnail_id = get_post_thumbnail_id($product_id);
+        if ($thumbnail_id) {
+            $file_path = get_attached_file($thumbnail_id);
+            if (empty($file_path) || !file_exists($file_path)) {
+                wp_delete_attachment($thumbnail_id, true);
+                delete_post_thumbnail($product_id);
+            }
+        }
+        
+        // Check gallery images
+        $gallery_ids = get_post_meta($product_id, '_product_image_gallery', true);
+        if (!empty($gallery_ids)) {
+            $ids = explode(',', $gallery_ids);
+            $valid_ids = array();
+            
+            foreach ($ids as $id) {
+                $id = intval($id);
+                if ($id > 0) {
+                    $file_path = get_attached_file($id);
+                    if (!empty($file_path) && file_exists($file_path)) {
+                        $valid_ids[] = $id;
+                    } else {
+                        wp_delete_attachment($id, true);
+                    }
+                }
+            }
+            
+            if (count($valid_ids) !== count($ids)) {
+                update_post_meta($product_id, '_product_image_gallery', implode(',', $valid_ids));
+            }
+        }
+    }
+    
+    /**
+     * Import gallery with timeout protection per image
+     */
+    private function import_enhanced_gallery_safe($product_id, $gallery) {
+        if (empty($gallery) || !is_array($gallery)) {
+            return;
+        }
+        
+        $attachment_ids = array();
+        $max_images = 10; // Limit images per product
+        $image_count = 0;
+        
+        foreach ($gallery as $index => $media_item) {
+            if ($image_count >= $max_images) {
+                break;
+            }
+            
+            if (!isset($media_item['link'])) {
+                continue;
+            }
+            
+            $image_url = $media_item['link'];
+            $sequence = $media_item['sequence'] ?? $index;
+            
+            // Import with shorter timeout
+            $attachment_id = $this->import_image_from_url_safe($image_url, $product_id);
+            
+            if ($attachment_id) {
+                $attachment_ids[] = array(
+                    'id' => $attachment_id,
+                    'sequence' => $sequence
+                );
+                $image_count++;
+            }
+        }
+        
+        if (!empty($attachment_ids)) {
+            usort($attachment_ids, function($a, $b) {
+                return $a['sequence'] <=> $b['sequence'];
+            });
+            
+            $sorted_ids = array_column($attachment_ids, 'id');
+            
+            set_post_thumbnail($product_id, $sorted_ids[0]);
+            
+            if (count($sorted_ids) > 1) {
+                $gallery_ids = array_slice($sorted_ids, 1);
+                update_post_meta($product_id, '_product_image_gallery', implode(',', $gallery_ids));
+            }
+        }
+    }
+    
+    /**
+     * Import image with shorter timeout and error handling
+     */
+    private function import_image_from_url_safe($image_url, $product_id) {
+        try {
+            $existing_attachment = $this->get_attachment_by_url($image_url);
+            if ($existing_attachment) {
+                // Verify the attachment file exists
+                $file_path = get_attached_file($existing_attachment);
+                if (!empty($file_path) && file_exists($file_path)) {
+                    return $existing_attachment;
+                }
+                // File doesn't exist, delete the broken attachment
+                wp_delete_attachment($existing_attachment, true);
+            }
+            
+            $upload_dir = wp_upload_dir();
+            $image_data = wp_remote_get($image_url, array(
+                'timeout' => 15, // Shorter timeout
+                'user-agent' => 'WooCommerce-ELKO-Integration/' . ELKO_PLUGIN_VERSION
+            ));
+            
+            if (is_wp_error($image_data)) {
+                return false;
+            }
+            
+            $response_code = wp_remote_retrieve_response_code($image_data);
+            if ($response_code !== 200) {
+                return false;
+            }
+            
+            $image_content = wp_remote_retrieve_body($image_data);
+            if (empty($image_content) || strlen($image_content) < 1000) { // Minimum 1KB for valid image
+                return false;
+            }
+            
+            $filename = basename(parse_url($image_url, PHP_URL_PATH));
+            if (empty($filename) || strpos($filename, '.') === false) {
+                $filename = 'elko-image-' . time() . '.jpg';
+            }
+            
+            $filename = wp_unique_filename($upload_dir['path'], $filename);
+            
+            if (wp_mkdir_p($upload_dir['path'])) {
+                $file = $upload_dir['path'] . '/' . $filename;
+            } else {
+                $file = $upload_dir['basedir'] . '/' . $filename;
+            }
+            
+            $file_written = file_put_contents($file, $image_content);
+            if ($file_written === false) {
+                return false;
+            }
+            
+            $wp_filetype = wp_check_filetype($filename);
+            $attachment = array(
+                'post_mime_type' => $wp_filetype['type'],
+                'post_title' => sanitize_file_name($filename),
+                'post_content' => '',
+                'post_status' => 'inherit'
+            );
+            
+            $attach_id = wp_insert_attachment($attachment, $file, $product_id);
+            if (!is_wp_error($attach_id)) {
+                require_once(ABSPATH . 'wp-admin/includes/image.php');
+                $attach_data = wp_generate_attachment_metadata($attach_id, $file);
+                wp_update_attachment_metadata($attach_id, $attach_data);
+                
+                // Store original URL for deduplication
+                update_post_meta($attach_id, '_elko_source_url', $image_url);
+                
+                return $attach_id;
+            }
+            
+            return false;
+        } catch (Exception $e) {
+            return false;
+        }
+    }
+    
+    /**
+     * Delete product attachments
+     */
+    private function delete_product_attachments($product_id) {
+        $thumbnail_id = get_post_thumbnail_id($product_id);
+        if ($thumbnail_id) {
+            wp_delete_attachment($thumbnail_id, true);
+        }
+        
+        $gallery_ids = get_post_meta($product_id, '_product_image_gallery', true);
+        if (!empty($gallery_ids)) {
+            $ids = explode(',', $gallery_ids);
+            foreach ($ids as $id) {
+                wp_delete_attachment(intval($id), true);
+            }
+        }
+        
+        delete_post_thumbnail($product_id);
+        delete_post_meta($product_id, '_product_image_gallery');
+    }
+    
+    /**
+     * Get products by ELKO categories
+     * Returns products that have an _elko_category_code meta matching the given categories
+     */
+    private function get_products_by_elko_categories($categories) {
+        global $wpdb;
+        
+        if (empty($categories)) {
+            return array();
+        }
+        
+        // Prepare placeholders for the IN clause
+        $placeholders = implode(',', array_fill(0, count($categories), '%s'));
+        
+        // Get products that have the specified ELKO category codes
+        $query = $wpdb->prepare(
+            "SELECT DISTINCT pm1.post_id, pm1.meta_value as elko_id 
+             FROM {$wpdb->postmeta} pm1
+             INNER JOIN {$wpdb->postmeta} pm2 ON pm1.post_id = pm2.post_id
+             WHERE pm1.meta_key = '_elko_product_id'
+             AND pm2.meta_key = '_elko_category_code'
+             AND pm2.meta_value IN ({$placeholders})",
+            ...$categories
+        );
+        
+        $products = $wpdb->get_results($query);
+        
+        ELKO_Logger::log_sync('images', 'info', "Found " . count($products) . " products in " . count($categories) . " selected categories");
+        
+        return $products;
+    }
+    
+    /**
+     * Count products in categories
+     */
+    private function count_products_in_categories($categories) {
+        $total = 0;
+        
+        foreach ($categories as $category_code_id) {
+            $products = $this->api_client->get_products_by_category($category_code_id);
+            if (!is_wp_error($products) && is_array($products)) {
+                $total += count($products);
+            }
+        }
+        
+        return $total;
+    }
+    
+    /**
+     * Clean product name
+     */
+    private function clean_product_name($name) {
+        if (empty($name)) {
+            return $name;
+        }
+        
         $removeWords = array(
             'Notebook', 'Graphics Card', 'SSD', 'Power Supply', 'Case', 'CPU', 'Mainboard',
             'Desktop', 'Laptop', 'Gaming', 'Professional', 'Business', 'Home', 'Office'
         );
         
-        foreach ($products as &$product) {
-            if (isset($product['name']) && !empty($product['name'])) {
-                $originalName = $product['name'];
-                
-                // 1. Заменяем "|" на пробелы с удалением лишних пробелов вокруг
-                $product['name'] = preg_replace('/\s*\|\s*/', ' ', $product['name']);
-                
-                // 2. Удаляем указанные нежелательные слова (без учета регистра)
-                $product['name'] = str_ireplace($removeWords, '', $product['name']);
-                
-                // 3. Вставляем пробелы между слипшимися словами
-                $product['name'] = preg_replace('/((?<=[A-Z])(?=[A-Z][a-z])|(?<=[a-z])(?=[A-Z]))/', ' ', $product['name']);
-                
-                // 4. Нормализуем пробелы: заменяем множественные пробелы на один и обрезаем строку
-                $product['name'] = preg_replace('/\s+/', ' ', $product['name']);
-                $product['name'] = trim($product['name']);
-                
-                // 5. Убираем пустые строки в начале и конце от запятых и других знаков
-                $product['name'] = trim($product['name'], ' ,-/()[]');
-                
-                // 6. Если название стало слишком коротким, используем оригинальное
-                if (strlen($product['name']) < 5) {
-                    $product['name'] = $originalName;
-                }
-                
-                // Логируем изменения для отладки
-                if ($originalName !== $product['name']) {
-                    error_log("ELKO: Name cleaned - Original: '{$originalName}' → Cleaned: '{$product['name']}'");
-                }
+        $originalName = $name;
+        
+        // Replace "|" with spaces
+        $name = preg_replace('/\s*\|\s*/', ' ', $name);
+        
+        // Remove unwanted words
+        $name = str_ireplace($removeWords, '', $name);
+        
+        // Insert spaces between stuck words
+        $name = preg_replace('/((?<=[A-Z])(?=[A-Z][a-z])|(?<=[a-z])(?=[A-Z]))/', ' ', $name);
+        
+        // Normalize spaces
+        $name = preg_replace('/\s+/', ' ', $name);
+        $name = trim($name);
+        $name = trim($name, ' ,-/()[]');
+        
+        // If name became too short, use original
+        if (strlen($name) < 5) {
+            $name = $originalName;
+        }
+        
+        return $name;
+    }
+    
+    /**
+     * Parse product attributes from description data
+     */
+    private function parse_product_attributes($description_data) {
+        $attributes = array();
+        
+        if (!isset($description_data['description']) || !is_array($description_data['description'])) {
+            return $attributes;
+        }
+        
+        $skip_criteria = array('Description', 'Vendor Homepage', 'Category Code', 'Unit Box Height', 'Unit Box Width', 'Unit Box Length');
+        
+        foreach ($description_data['description'] as $criteria) {
+            if (!isset($criteria['criteria']) || !isset($criteria['value'])) {
+                continue;
+            }
+            
+            $name = $criteria['criteria'];
+            $value = $criteria['value'];
+            $measurement = $criteria['measurement'] ?? '';
+            
+            if (in_array($name, $skip_criteria)) {
+                continue;
+            }
+            
+            if (!empty($measurement) && !empty($value)) {
+                $value = $value . ' ' . $measurement;
+            }
+            
+            $value = strip_tags($value);
+            $value = html_entity_decode($value);
+            
+            if (!empty($value) && $value !== 'none' && $value !== '0') {
+                $attr_key = sanitize_key($name);
+                $attributes[$attr_key] = array(
+                    'name' => $name,
+                    'value' => $value,
+                    'is_visible' => true,
+                    'is_taxonomy' => false,
+                );
             }
         }
-        unset($product); // Убираем ссылку
+        
+        return $attributes;
     }
     
     /**
-     * Get third-level categories (end categories where products should be imported)
+     * Get third-level categories dynamically from API
      */
     private function get_third_level_categories() {
-        return array(
-            // PC Components - 3rd level categories
-            'CPU' => 'CPU_4028',
-            'Mainboards for AMD CPUs' => 'MBA_4106', 
-            'Mainboards for Intel CPUs' => 'MBI_4040',
-            'Memory DIMM' => 'MEM_4041',
-            'Memory SODIMM' => 'MEB_5876',
-            'Video Cards' => 'VGP_4047',
-            'Sound Cards' => 'SOU_6327',
-            'SSD SATA' => 'SSM_4891',
-            'SSD M.2' => 'SSU_5151',
-            'SSD MSATA' => 'SST_6189',
-            'HDD Desktop SATA' => 'HDS_4413',
-            'HDD Mobile SATA' => 'HMS_4414',
-            'Cases' => 'CAS_4816',
-            'Desktop Computer PSU' => 'PSU_4817',
-            'CPU Coolers' => 'COC_4481',
-            'System & VGA Coolers' => 'COS_4482',
-            
-            // Peripherals & Office Products - 3rd level categories
-            'Keyboards' => 'KEY_4039',
-            'Mouse Devices' => 'MOU_4045',
-            'Mouse Pads' => 'MOP_6307',
-            'Numeric Keypads' => 'KPA_8124',
-            'Monitors' => 'LC3_4815',
-            'LFD Monitors' => 'LCD_6342',
-            'Headphones' => 'HPH_6313',
-            'Speakers' => 'SPE_6315',
-            'Microphones' => 'MIC_6471',
-            'Web Cameras' => 'WCA_4052',
-            'Laser Printers' => 'LAS_4067',
-            'All In One' => 'AIO_4065'
-        );
+        // Use API client to get all allowed categories dynamically
+        return $this->api_client->get_allowed_categories();
     }
     
     /**
-     * Import single product with enhanced data
+     * Import single product with add/update logic
      */
     private function import_single_product($product_data, $category_name) {
         try {
-            // Validate required fields
             if (!isset($product_data['id']) || !isset($product_data['name']) || !isset($product_data['price'])) {
-                error_log("ELKO: Skipping product: missing required fields");
                 return false;
             }
             
             $elko_id = $product_data['id'];
-            $product_name = $product_data['name']; // Already cleaned
-            $elko_price = $product_data['price'];
-            $product_code = $product_data['code'] ?? '';
-            $description = $product_data['description'] ?? '';
-            $short_description = $product_data['shortDescription'] ?? '';
-            $manufacturer = $product_data['manufacturer'] ?? '';
-            $warranty = $product_data['warranty'] ?? '';
-            
-            // Enhanced data
-            $gallery = $product_data['gallery'] ?? array();
-            $attributes = $product_data['attributes'] ?? array();
-            $detailed_description = $product_data['detailed_description'] ?? array();
-            
-            error_log("ELKO: Processing product {$elko_id} - {$product_name} (Gallery: " . count($gallery) . " images, Attributes: " . count($attributes) . ")");
             
             // Check if product already exists
             $existing_product_id = $this->get_product_by_elko_id($elko_id);
@@ -206,53 +911,55 @@ class ELKO_Product_Importer {
             }
             
         } catch (Exception $e) {
-            error_log("ELKO: Error importing product {$product_data['id']}: " . $e->getMessage());
+            ELKO_Logger::log_sync('products', 'error', "Error importing product {$product_data['id']}: " . $e->getMessage());
             return false;
         }
     }
     
     /**
-     * Create new product with enhanced data
+     * Create new product
      */
     private function create_new_product($product_data, $category_name) {
         $elko_id = $product_data['id'];
-        $product_name = $product_data['name']; // Already cleaned
+        $product_name = $product_data['name'];
         $elko_price = $product_data['price'];
         $product_code = $product_data['code'] ?? '';
         $description = $product_data['description'] ?? '';
         $short_description = $product_data['shortDescription'] ?? '';
-        $manufacturer = $product_data['manufacturer'] ?? '';
+        // API uses vendorName, not manufacturer
+        $manufacturer = $product_data['vendorName'] ?? $product_data['manufacturer'] ?? '';
         $warranty = $product_data['warranty'] ?? '';
         $gallery = $product_data['gallery'] ?? array();
         $attributes = $product_data['attributes'] ?? array();
         $detailed_description = $product_data['detailed_description'] ?? array();
+        // Get manufacturerCode directly from API response first
+        $manufacturer_code = $product_data['manufacturerCode'] ?? '';
         
-        // Calculate final price
         $final_price = $this->price_calculator->calculate_price($elko_price);
         
         if ($final_price <= 0) {
-            error_log("ELKO: Skipping product {$elko_id}: invalid price calculation");
             return false;
         }
         
-        // Create WooCommerce product
         $product = new WC_Product_Simple();
         
-        // Basic information with cleaned name
         $product->set_name($product_name);
         
-        // Enhanced description from detailed data
+        // Get description from API "Description" criteria, fallback to basic description
         $enhanced_description = $this->build_enhanced_description($detailed_description, $description);
         $product->set_description($enhanced_description);
         
-        $product->set_short_description($short_description);
+        // Get short description from API "Summary" criteria, fallback to shortDescription
+        $enhanced_short_description = $this->build_short_description($detailed_description, $short_description);
+        $product->set_short_description($enhanced_short_description);
         
-        // FIXED: Use manufacturer code as SKU if available, fallback to ELKO code
-        $manufacturer_code = $this->extract_manufacturer_code($detailed_description, $product_data);
+        // Use manufacturerCode as SKU - first from API, then from description criteria
+        if (empty($manufacturer_code)) {
+            $manufacturer_code = $this->extract_manufacturer_code($detailed_description, $product_data);
+        }
         $unique_sku = $this->get_unique_sku($manufacturer_code ?: $product_code, $elko_id);
         $product->set_sku($unique_sku);
         
-        // Pricing
         $product->set_regular_price($final_price);
         $product->set_price($final_price);
         
@@ -264,61 +971,150 @@ class ELKO_Product_Importer {
             $product->set_stock_status($stock_quantity > 0 ? 'instock' : 'outofstock');
         }
         
-        // FIXED: Set status to publish instead of draft
         $product->set_status('publish');
-        
-        // Catalog visibility
         $product->set_catalog_visibility('visible');
         
-        // Weight and dimensions from detailed description
         $this->set_product_dimensions($product, $detailed_description);
         
-        // Save product
         $product_id = $product->save();
         
         if (!$product_id) {
-            error_log("ELKO: Failed to create product {$elko_id}");
             return false;
         }
         
-        // Add to category
         $this->assign_product_to_category($product_id, $category_name);
         
-        // FIXED: Add brand using Perfect Brands WooCommerce
         if (!empty($manufacturer)) {
             $this->assign_product_brand($product_id, $manufacturer);
         }
         
-        // Add ELKO meta data
+        // Meta data
         update_post_meta($product_id, '_elko_product_id', $elko_id);
         update_post_meta($product_id, '_elko_original_price', $elko_price);
         update_post_meta($product_id, '_elko_final_price', $final_price);
-        update_post_meta($product_id, '_elko_last_update', '2025-10-21 14:03:14');
+        update_post_meta($product_id, '_elko_last_update', current_time('mysql'));
         update_post_meta($product_id, '_elko_manufacturer', $manufacturer);
         update_post_meta($product_id, '_elko_warranty', $warranty);
         update_post_meta($product_id, '_elko_original_code', $product_code);
         update_post_meta($product_id, '_elko_manufacturer_code', $manufacturer_code);
-        update_post_meta($product_id, '_elko_imported_by', 'MartinAbramov');
-        update_post_meta($product_id, '_elko_import_date', '2025-10-21 14:03:14');
         
-        // FIXED: Always import gallery
+        // Import gallery
         if (!empty($gallery)) {
-            error_log("ELKO: Importing gallery for product {$product_id} with " . count($gallery) . " images");
             $this->import_enhanced_gallery($product_id, $gallery);
         }
         
-        // FIXED: Add enhanced attributes - make sure they're processed
+        // Add attributes
         $this->add_enhanced_attributes($product_id, $attributes, $product_data, $detailed_description);
         
-        error_log("ELKO: Successfully imported product: {$product_name} (ID: {$product_id}, SKU: {$unique_sku})");
         return true;
     }
     
     /**
-     * Extract manufacturer code from detailed description
+     * Update existing product with prices, stock, descriptions and attributes
+     */
+    private function update_existing_product($product_id, $product_data, $category_name) {
+        try {
+            $wc_product = wc_get_product($product_id);
+            
+            if (!$wc_product) {
+                return false;
+            }
+            
+            $elko_price = $product_data['price'];
+            $final_price = $this->price_calculator->calculate_price($elko_price);
+            
+            if ($final_price > 0) {
+                $wc_product->set_regular_price($final_price);
+                $wc_product->set_price($final_price);
+            }
+            
+            // Update stock
+            if (isset($product_data['quantity'])) {
+                $stock_quantity = $this->parse_stock_quantity($product_data['quantity']);
+                $wc_product->set_manage_stock(true);
+                $wc_product->set_stock_quantity($stock_quantity);
+                $wc_product->set_stock_status($stock_quantity > 0 ? 'instock' : 'outofstock');
+            }
+            
+            // Update descriptions from API data
+            $detailed_description = $product_data['detailed_description'] ?? array();
+            $description = $product_data['description'] ?? '';
+            $short_description = $product_data['shortDescription'] ?? '';
+            
+            // Update full description from "Description" criteria
+            $enhanced_description = $this->build_enhanced_description($detailed_description, $description);
+            if (!empty($enhanced_description)) {
+                $wc_product->set_description($enhanced_description);
+            }
+            
+            // Update short description from "Summary" criteria
+            $enhanced_short_description = $this->build_short_description($detailed_description, $short_description);
+            if (!empty($enhanced_short_description)) {
+                $wc_product->set_short_description($enhanced_short_description);
+            }
+            
+            // Update SKU from manufacturerCode if current SKU is ELKO-format
+            $current_sku = $wc_product->get_sku();
+            if (strpos($current_sku, 'ELKO-') === 0) {
+                $manufacturer_code = $product_data['manufacturerCode'] ?? '';
+                if (empty($manufacturer_code)) {
+                    $manufacturer_code = $this->extract_manufacturer_code($detailed_description, $product_data);
+                }
+                if (!empty($manufacturer_code)) {
+                    $elko_id = $product_data['id'] ?? '';
+                    $new_sku = $this->get_unique_sku($manufacturer_code, $elko_id);
+                    $wc_product->set_sku($new_sku);
+                }
+            }
+            
+            $wc_product->save();
+            
+            // Update meta
+            update_post_meta($product_id, '_elko_original_price', $elko_price);
+            update_post_meta($product_id, '_elko_final_price', $final_price);
+            update_post_meta($product_id, '_elko_last_update', current_time('mysql'));
+            
+            // Update manufacturer/brand from vendorName
+            $manufacturer = $product_data['vendorName'] ?? $product_data['manufacturer'] ?? '';
+            if (!empty($manufacturer)) {
+                update_post_meta($product_id, '_elko_manufacturer', $manufacturer);
+                $this->assign_product_brand($product_id, $manufacturer);
+            }
+            
+            // Check if images exist, if not import them
+            $thumbnail_id = get_post_thumbnail_id($product_id);
+            if (!$thumbnail_id && !empty($product_data['gallery'])) {
+                $this->import_enhanced_gallery($product_id, $product_data['gallery']);
+            }
+            
+            // Update attributes if provided
+            if (!empty($product_data['attributes'])) {
+                $existing_attrs = get_post_meta($product_id, '_product_attributes', true);
+                if (!is_array($existing_attrs)) {
+                    $existing_attrs = array();
+                }
+                $merged_attrs = array_merge($existing_attrs, $product_data['attributes']);
+                update_post_meta($product_id, '_product_attributes', $merged_attrs);
+            }
+            
+            return true;
+            
+        } catch (Exception $e) {
+            ELKO_Logger::log_sync('products', 'error', "Error updating product {$product_id}: " . $e->getMessage());
+            return false;
+        }
+    }
+    
+    /**
+     * Extract manufacturer code from detailed description or API data
      */
     private function extract_manufacturer_code($detailed_description, $product_data) {
-        // First try to get from detailed description
+        // First check if manufacturerCode is directly in product data
+        if (!empty($product_data['manufacturerCode'])) {
+            return trim($product_data['manufacturerCode']);
+        }
+        
+        // Then check in detailed description criteria
         if (isset($detailed_description['description']) && is_array($detailed_description['description'])) {
             foreach ($detailed_description['description'] as $criteria) {
                 if (!isset($criteria['criteria']) || !isset($criteria['value'])) {
@@ -328,68 +1124,80 @@ class ELKO_Product_Importer {
                 $criteria_name = strtolower($criteria['criteria']);
                 $value = trim($criteria['value']);
                 
-                // Look for manufacturer codes in various fields
-                if (in_array($criteria_name, ['product model code', 'model code', 'part number', 'manufacturer part number']) && !empty($value)) {
+                if (in_array($criteria_name, ['product model code', 'model code', 'part number', 'manufacturer part number', 'manufacturercode', 'manufacturer code']) && !empty($value)) {
                     return $value;
                 }
             }
         }
         
-        // Fallback to basic product code
+        // Fallback to product code
         return $product_data['code'] ?? '';
     }
     
     /**
-     * Assign product brand using Perfect Brands WooCommerce
+     * Get unique SKU
+     */
+    private function get_unique_sku($product_code, $elko_id) {
+        if (empty($product_code)) {
+            return 'ELKO-' . $elko_id;
+        }
+        
+        $existing_product_id = wc_get_product_id_by_sku($product_code);
+        if (!$existing_product_id) {
+            return $product_code;
+        }
+        
+        $existing_elko_id = get_post_meta($existing_product_id, '_elko_product_id', true);
+        if ($existing_elko_id == $elko_id) {
+            return $product_code;
+        }
+        
+        $counter = 1;
+        $new_sku = $product_code . '-' . $counter;
+        while (wc_get_product_id_by_sku($new_sku)) {
+            $counter++;
+            $new_sku = $product_code . '-' . $counter;
+        }
+        return $new_sku;
+    }
+    
+    /**
+     * Assign product brand using Perfect Brands
      */
     private function assign_product_brand($product_id, $manufacturer) {
         if (empty($manufacturer)) {
             return;
         }
         
-        // Check if Perfect Brands taxonomy exists
         if (!taxonomy_exists('pwb-brand')) {
-            error_log("ELKO: Perfect Brands taxonomy not found, skipping brand assignment");
             return;
         }
         
-        // Find or create brand term
         $brand_term = get_term_by('name', $manufacturer, 'pwb-brand');
         
         if (!$brand_term) {
-            // Create new brand term
             $brand_result = wp_insert_term($manufacturer, 'pwb-brand', array(
                 'slug' => sanitize_title($manufacturer)
             ));
             
             if (!is_wp_error($brand_result)) {
                 $brand_term_id = $brand_result['term_id'];
-                error_log("ELKO: Created new brand: {$manufacturer} (ID: {$brand_term_id})");
             } else {
-                error_log("ELKO: Failed to create brand {$manufacturer}: " . $brand_result->get_error_message());
                 return;
             }
         } else {
             $brand_term_id = $brand_term->term_id;
         }
         
-        // Assign brand to product
-        $result = wp_set_post_terms($product_id, array($brand_term_id), 'pwb-brand');
-        
-        if (!is_wp_error($result)) {
-            error_log("ELKO: Assigned brand {$manufacturer} to product {$product_id}");
-        } else {
-            error_log("ELKO: Failed to assign brand {$manufacturer} to product {$product_id}");
-        }
+        wp_set_post_terms($product_id, array($brand_term_id), 'pwb-brand');
     }
     
     /**
-     * Add enhanced attributes from detailed description - FIXED VERSION
+     * Add enhanced attributes
      */
     private function add_enhanced_attributes($product_id, $attributes, $product_data, $detailed_description) {
         $final_attributes = array();
         
-        // Add basic product attributes
         if (!empty($product_data['manufacturer'])) {
             $final_attributes['manufacturer'] = array(
                 'name' => 'Manufacturer',
@@ -417,45 +1225,6 @@ class ELKO_Product_Importer {
             );
         }
         
-        // FIXED: Process detailed description attributes
-        if (isset($detailed_description['description']) && is_array($detailed_description['description'])) {
-            foreach ($detailed_description['description'] as $criteria) {
-                if (!isset($criteria['criteria']) || !isset($criteria['value'])) {
-                    continue;
-                }
-                
-                $name = $criteria['criteria'];
-                $value = $criteria['value'];
-                $measurement = $criteria['measurement'] ?? '';
-                
-                // Skip certain criteria
-                $skip_criteria = array('Description', 'Vendor Homepage', 'Category Code', 'Unit Box Height', 'Unit Box Width', 'Unit Box Length');
-                if (in_array($name, $skip_criteria)) {
-                    continue;
-                }
-                
-                // Format value with measurement
-                if (!empty($measurement) && !empty($value)) {
-                    $value = $value . ' ' . $measurement;
-                }
-                
-                // Clean up value
-                $value = strip_tags($value);
-                $value = html_entity_decode($value);
-                
-                if (!empty($value) && $value !== 'none' && $value !== '0') {
-                    $attr_key = sanitize_key($name);
-                    $final_attributes[$attr_key] = array(
-                        'name' => $name,
-                        'value' => $value,
-                        'is_visible' => true,
-                        'is_taxonomy' => false,
-                    );
-                }
-            }
-        }
-        
-        // FIXED: Also add parsed attributes from API if available
         if (!empty($attributes) && is_array($attributes)) {
             foreach ($attributes as $attr_key => $attr_data) {
                 if (isset($attr_data['name']) && isset($attr_data['value'])) {
@@ -466,36 +1235,26 @@ class ELKO_Product_Importer {
         
         if (!empty($final_attributes)) {
             update_post_meta($product_id, '_product_attributes', $final_attributes);
-            error_log("ELKO: Added " . count($final_attributes) . " attributes to product {$product_id}: " . implode(', ', array_keys($final_attributes)));
-        } else {
-            error_log("ELKO: No attributes to add for product {$product_id}");
         }
     }
     
     /**
-     * Import enhanced gallery from ELKO media data - FIXED VERSION
+     * Import enhanced gallery
      */
     private function import_enhanced_gallery($product_id, $gallery) {
         if (empty($gallery) || !is_array($gallery)) {
-            error_log("ELKO: No gallery data for product {$product_id}");
             return;
         }
-        
-        error_log("ELKO: Starting gallery import for product {$product_id} with " . count($gallery) . " images");
         
         $attachment_ids = array();
         
         foreach ($gallery as $index => $media_item) {
             if (!isset($media_item['link'])) {
-                error_log("ELKO: Gallery item {$index} missing link for product {$product_id}");
                 continue;
             }
             
-            // Accept all media types, not just Pictures
             $image_url = $media_item['link'];
             $sequence = $media_item['sequence'] ?? $index;
-            
-            error_log("ELKO: Importing image {$index}: {$image_url}");
             
             $attachment_id = $this->import_image_from_url($image_url, $product_id);
             
@@ -504,72 +1263,52 @@ class ELKO_Product_Importer {
                     'id' => $attachment_id,
                     'sequence' => $sequence
                 );
-                error_log("ELKO: Successfully imported image {$index} as attachment {$attachment_id}");
-            } else {
-                error_log("ELKO: Failed to import image {$index}: {$image_url}");
             }
         }
         
         if (!empty($attachment_ids)) {
-            // Sort by sequence
             usort($attachment_ids, function($a, $b) {
                 return $a['sequence'] <=> $b['sequence'];
             });
             
-            // Extract just the IDs
             $sorted_ids = array_column($attachment_ids, 'id');
             
-            error_log("ELKO: Setting gallery for product {$product_id}: " . implode(',', $sorted_ids));
+            set_post_thumbnail($product_id, $sorted_ids[0]);
             
-            // Set first image as featured
-            $featured_result = set_post_thumbnail($product_id, $sorted_ids[0]);
-            error_log("ELKO: Set featured image {$sorted_ids[0]} for product {$product_id}: " . ($featured_result ? 'SUCCESS' : 'FAILED'));
-            
-            // Set gallery images (all except first)
             if (count($sorted_ids) > 1) {
                 $gallery_ids = array_slice($sorted_ids, 1);
-                $gallery_result = update_post_meta($product_id, '_product_image_gallery', implode(',', $gallery_ids));
-                error_log("ELKO: Set gallery images for product {$product_id}: " . implode(',', $gallery_ids) . " Result: " . ($gallery_result ? 'SUCCESS' : 'FAILED'));
+                update_post_meta($product_id, '_product_image_gallery', implode(',', $gallery_ids));
             }
-        } else {
-            error_log("ELKO: No images successfully imported for product {$product_id}");
         }
     }
     
     /**
-     * Import image from URL - IMPROVED VERSION
+     * Import image from URL
      */
     private function import_image_from_url($image_url, $product_id) {
         try {
-            // Check if image already exists
             $existing_attachment = $this->get_attachment_by_url($image_url);
             if ($existing_attachment) {
-                error_log("ELKO: Image already exists: {$image_url} (ID: {$existing_attachment})");
                 return $existing_attachment;
             }
-            
-            error_log("ELKO: Downloading image: {$image_url}");
             
             $upload_dir = wp_upload_dir();
             $image_data = wp_remote_get($image_url, array(
                 'timeout' => 30,
-                'user-agent' => 'WooCommerce-ELKO-Integration/1.0.0'
+                'user-agent' => 'WooCommerce-ELKO-Integration/' . ELKO_PLUGIN_VERSION
             ));
             
             if (is_wp_error($image_data)) {
-                error_log("ELKO: Failed to download image {$image_url}: " . $image_data->get_error_message());
                 return false;
             }
             
             $response_code = wp_remote_retrieve_response_code($image_data);
             if ($response_code !== 200) {
-                error_log("ELKO: HTTP {$response_code} for image {$image_url}");
                 return false;
             }
             
             $image_content = wp_remote_retrieve_body($image_data);
             if (empty($image_content)) {
-                error_log("ELKO: Empty image content for {$image_url}");
                 return false;
             }
             
@@ -578,7 +1317,6 @@ class ELKO_Product_Importer {
                 $filename = 'elko-image-' . time() . '.jpg';
             }
             
-            // Ensure unique filename
             $filename = wp_unique_filename($upload_dir['path'], $filename);
             
             if (wp_mkdir_p($upload_dir['path'])) {
@@ -587,14 +1325,10 @@ class ELKO_Product_Importer {
                 $file = $upload_dir['basedir'] . '/' . $filename;
             }
             
-            // Write file
             $file_written = file_put_contents($file, $image_content);
             if ($file_written === false) {
-                error_log("ELKO: Failed to write image file {$file}");
                 return false;
             }
-            
-            error_log("ELKO: Image written to {$file} ({$file_written} bytes)");
             
             $wp_filetype = wp_check_filetype($filename, null);
             $attachment = array(
@@ -611,32 +1345,23 @@ class ELKO_Product_Importer {
                 $attachment_data = wp_generate_attachment_metadata($attachment_id, $file);
                 wp_update_attachment_metadata($attachment_id, $attachment_data);
                 
-                // Store original URL for deduplication
                 update_post_meta($attachment_id, '_elko_image_url', $image_url);
                 
-                error_log("ELKO: Created attachment {$attachment_id} for {$image_url}");
                 return $attachment_id;
             } else {
-                error_log("ELKO: Failed to create attachment for {$image_url}: " . $attachment_id->get_error_message());
-                // Clean up file if attachment creation failed
                 if (file_exists($file)) {
                     unlink($file);
                 }
             }
             
         } catch (Exception $e) {
-            error_log("ELKO: Exception importing image {$image_url}: " . $e->getMessage());
+            ELKO_Logger::log_sync('images', 'error', "Error importing image {$image_url}: " . $e->getMessage());
         }
         
         return false;
     }
     
-    // Остальные методы остаются теми же...
-    private function update_existing_product($product_id, $product_data, $category_name) { 
-        // Existing implementation with same fixes applied
-        return true;
-    }
-    
+    // Helper methods
     private function get_product_by_elko_id($elko_id) {
         global $wpdb;
         return $wpdb->get_var($wpdb->prepare("SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_elko_product_id' AND meta_value = %s", $elko_id));
@@ -663,30 +1388,6 @@ class ELKO_Product_Importer {
         return 0;
     }
     
-    private function get_unique_sku($product_code, $elko_id) {
-        if (empty($product_code)) {
-            return 'ELKO-' . $elko_id;
-        }
-        
-        $existing_product_id = wc_get_product_id_by_sku($product_code);
-        if (!$existing_product_id) {
-            return $product_code;
-        }
-        
-        $existing_elko_id = get_post_meta($existing_product_id, '_elko_product_id', true);
-        if ($existing_elko_id == $elko_id) {
-            return $product_code;
-        }
-        
-        $counter = 1;
-        $new_sku = $product_code . '-' . $counter;
-        while (wc_get_product_id_by_sku($new_sku)) {
-            $counter++;
-            $new_sku = $product_code . '-' . $counter;
-        }
-        return $new_sku;
-    }
-    
     private function get_attachment_by_url($image_url) {
         global $wpdb;
         $attachment_id = $wpdb->get_var($wpdb->prepare("SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_elko_image_url' AND meta_value = %s", $image_url));
@@ -698,6 +1399,7 @@ class ELKO_Product_Importer {
         
         if (isset($detailed_description['description']) && is_array($detailed_description['description'])) {
             foreach ($detailed_description['description'] as $criteria) {
+                // Look for "Description" criteria (full product description from API)
                 if (isset($criteria['criteria']) && $criteria['criteria'] === 'Description' && !empty($criteria['value'])) {
                     $description = $criteria['value'];
                     break;
@@ -719,6 +1421,35 @@ class ELKO_Product_Importer {
         }
         
         return $description;
+    }
+    
+    /**
+     * Extract short description (Summary) from detailed description API data
+     */
+    private function build_short_description($detailed_description, $fallback_short_description = '') {
+        $short_description = '';
+        
+        if (isset($detailed_description['description']) && is_array($detailed_description['description'])) {
+            foreach ($detailed_description['description'] as $criteria) {
+                // Look for "Summary" criteria (short product description from API)
+                if (isset($criteria['criteria']) && $criteria['criteria'] === 'Summary' && !empty($criteria['value'])) {
+                    $short_description = $criteria['value'];
+                    break;
+                }
+            }
+        }
+        
+        if (empty($short_description)) {
+            $short_description = $fallback_short_description;
+        }
+        
+        // Clean and format short description
+        if (!empty($short_description)) {
+            $short_description = wp_strip_all_tags($short_description);
+            $short_description = html_entity_decode($short_description, ENT_QUOTES, 'UTF-8');
+        }
+        
+        return $short_description;
     }
     
     private function set_product_dimensions($product, $detailed_description) {
