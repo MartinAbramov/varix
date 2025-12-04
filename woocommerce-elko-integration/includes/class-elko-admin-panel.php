@@ -34,6 +34,7 @@ class ELKO_Admin_Panel {
         add_action('wp_ajax_elko_refresh_categories', array($this, 'ajax_refresh_categories'));
         add_action('wp_ajax_elko_start_background_job', array($this, 'ajax_start_background_job'));
         add_action('wp_ajax_elko_get_active_job', array($this, 'ajax_get_active_job'));
+        add_action('wp_ajax_elko_resume_import', array($this, 'ajax_resume_import'));
 
         // Initialize emergency stop check
         $this->check_emergency_stop();
@@ -60,6 +61,11 @@ class ELKO_Admin_Panel {
             $url_params['categories'] = implode(',', $params['categories']);
         }
         
+        // Resume from specific position
+        if (!empty($params['resume_from'])) {
+            $url_params['resume_from'] = intval($params['resume_from']);
+        }
+        
         $url = add_query_arg($url_params, $cron_runner_url);
         
         // Send a non-blocking request (fire and forget)
@@ -74,7 +80,8 @@ class ELKO_Admin_Panel {
         );
         
         // Log that we're starting
-        ELKO_Logger::log_sync('background-job', 'started', "Starting background {$action} with session {$session_id}");
+        $resume_info = !empty($params['resume_from']) ? " (resuming from #{$params['resume_from']})" : '';
+        ELKO_Logger::log_sync('background-job', 'started', "Starting background {$action} with session {$session_id}" . $resume_info);
         
         // Fire the request
         wp_remote_get($url, $args);
@@ -416,9 +423,88 @@ class ELKO_Admin_Panel {
             update_option('elko_stop_session_' . $session_id, true);
         }
         
+        // Mark job as stopped in database
+        global $wpdb;
+        $progress_table = $wpdb->prefix . 'elko_import_progress';
+        if (!empty($session_id)) {
+            $wpdb->update(
+                $progress_table,
+                array('status' => 'stopped', 'completed_at' => current_time('mysql')),
+                array('session_id' => $session_id)
+            );
+        }
+        
         ELKO_Logger::log_sync('import', 'info', 'Import stop requested (graceful shutdown)');
         
         wp_send_json_success('⏹️ Stop requested. Import will finish current item and stop gracefully.');
+    }
+    
+    /**
+     * AJAX Resume Import - Skip current item and continue from next one
+     */
+    public function ajax_resume_import() {
+        check_ajax_referer('elko_ajax_nonce', 'nonce');
+        
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error('Insufficient permissions.');
+            return;
+        }
+        
+        $session_id = isset($_POST['session_id']) ? sanitize_text_field($_POST['session_id']) : '';
+        
+        if (empty($session_id)) {
+            wp_send_json_error('No session ID provided.');
+            return;
+        }
+        
+        global $wpdb;
+        $progress_table = $wpdb->prefix . 'elko_import_progress';
+        
+        // Get current job info
+        $job = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM {$progress_table} WHERE session_id = %s ORDER BY id DESC LIMIT 1",
+            $session_id
+        ));
+        
+        if (!$job) {
+            wp_send_json_error('Job not found.');
+            return;
+        }
+        
+        // Clear all stop flags
+        delete_option('elko_import_stop_requested');
+        delete_option('elko_emergency_stop');
+        delete_option('elko_force_stop');
+        delete_option('elko_stop_session_' . $session_id);
+        
+        // Set a skip flag for the current item
+        update_option('elko_skip_current_item_' . $session_id, true);
+        
+        // Mark as resumed and increment processed count (skip current stuck item)
+        $new_processed = intval($job->processed_items) + 1;
+        $wpdb->update(
+            $progress_table,
+            array(
+                'status' => 'running',
+                'processed_items' => $new_processed,
+                'current_item' => 'Resuming... skipping stuck item',
+                'updated_at' => current_time('mysql'),
+                'completed_at' => null
+            ),
+            array('session_id' => $session_id)
+        );
+        
+        // Restart the background job
+        $this->spawn_background_job($job->import_type, $session_id, array(
+            'resume_from' => $new_processed
+        ));
+        
+        ELKO_Logger::log_sync('import', 'info', "Import resumed from item {$new_processed}, skipped stuck item");
+        
+        wp_send_json_success(array(
+            'message' => "▶️ Resumed! Skipped stuck item and continuing from #{$new_processed}",
+            'processed' => $new_processed
+        ));
     }
     
     /**
@@ -1117,6 +1203,18 @@ class ELKO_Admin_Panel {
                 <div class="progress-info" style="margin-top: 10px;">
                     <div class="progress-current" style="font-weight: bold;"></div>
                     <div class="progress-stats" style="font-size: 12px; color: #666;"></div>
+                </div>
+                <!-- PROGRESS CONTROL BUTTONS -->
+                <div class="progress-controls" style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button type="button" id="progress-resume" class="button" style="background: #4caf50; color: white; border-color: #4caf50;">
+                        ▶️ Resume / Skip Stuck
+                    </button>
+                    <button type="button" id="progress-stop" class="button" style="background: #ff9800; color: white; border-color: #ff9800;">
+                        ⏹️ Stop Import
+                    </button>
+                    <span class="progress-stuck-warning" style="display: none; color: #f44336; font-size: 12px; align-self: center;">
+                        ⚠️ <span class="stuck-time">0</span> minutes without progress - Click Resume to skip stuck item
+                    </span>
                 </div>
             </div>
             

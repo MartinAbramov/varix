@@ -102,6 +102,12 @@ if (empty($session_id)) {
 }
 
 try {
+    // Get resume_from parameter if set
+    $resume_from = isset($_GET['resume_from']) ? intval($_GET['resume_from']) : 0;
+    if ($resume_from > 0) {
+        echo "Resuming from item #{$resume_from}...\n";
+    }
+    
     switch ($action) {
         case 'sync_products':
             echo "Starting product sync...\n";
@@ -124,7 +130,7 @@ try {
                     echo "Filtering by categories: " . implode(', ', $selected_categories) . "\n";
                 }
                 
-                $result = $importer->import_products($selected_categories, $session_id);
+                $result = $importer->import_products($selected_categories, $session_id, $resume_from);
                 
                 if ($result !== false) {
                     update_option('elko_last_product_sync', current_time('mysql'));
@@ -194,9 +200,16 @@ try {
             echo "Starting image fix...\n";
             if (class_exists('ELKO_Product_Importer')) {
                 $importer = new ELKO_Product_Importer();
+                
+                // Get selected categories from URL parameter (optional)
+                $categories = array();
+                if (isset($_GET['categories']) && !empty($_GET['categories'])) {
+                    $categories = explode(',', sanitize_text_field($_GET['categories']));
+                }
+                
                 $category_msg = !empty($categories) ? "from " . count($categories) . " selected categories" : "from all categories";
                 echo "Processing products {$category_msg}...\n";
-                $result = $importer->fix_all_images($session_id, $categories);
+                $result = $importer->fix_all_images($session_id, $categories, $resume_from);
                 
                 if ($result !== false) {
                     echo "✅ Image fix completed. Fixed: {$result} products {$category_msg}\n";
@@ -215,7 +228,7 @@ try {
             echo "Starting attributes import...\n";
             if (class_exists('ELKO_Product_Importer')) {
                 $importer = new ELKO_Product_Importer();
-                $result = $importer->import_attributes_only($session_id);
+                $result = $importer->import_attributes_only($session_id, $resume_from);
                 
                 if ($result !== false) {
                     echo "✅ Attributes import completed. Updated: {$result} products\n";

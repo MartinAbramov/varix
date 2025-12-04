@@ -166,7 +166,7 @@ class ELKO_Product_Importer {
     /**
      * Import products with category selection and progress tracking
      */
-    public function import_products($selected_categories = array(), $session_id = '') {
+    public function import_products($selected_categories = array(), $session_id = '', $resume_from = 0) {
         // Increase time limit for long-running imports
         if (function_exists('set_time_limit')) {
             @set_time_limit(0);
@@ -180,8 +180,10 @@ class ELKO_Product_Importer {
             @ini_set('memory_limit', '512M');
         }
         
-        // Clear stop flags at the beginning of a new import
-        delete_option('elko_import_stop_requested');
+        // Clear stop flags at the beginning of a new import (unless resuming)
+        if ($resume_from == 0) {
+            delete_option('elko_import_stop_requested');
+        }
         
         if ($this->should_stop()) {
             ELKO_Logger::log_sync('products', 'stopped', 'Import stopped due to stop flag (check elko_emergency_stop or elko_force_stop)');
@@ -210,8 +212,11 @@ class ELKO_Product_Importer {
             // Count total products first
             $total_products = $this->count_products_in_categories($categories);
             
-            if (!empty($session_id)) {
+            // Only init progress if not resuming
+            if (!empty($session_id) && $resume_from == 0) {
                 $this->init_progress('products', $total_products, $session_id);
+            } elseif (!empty($session_id)) {
+                $this->session_id = $session_id;
             }
             
             $imported_count = 0;
@@ -259,6 +264,12 @@ class ELKO_Product_Importer {
                     
                     $product_name = $product_data['name'] ?? 'Unknown Product';
                     $processed++;
+                    
+                    // Skip items if resuming
+                    if ($resume_from > 0 && $processed <= $resume_from) {
+                        $this->update_progress("Skipping (resumed) #{$processed}: {$product_name}", $processed);
+                        continue;
+                    }
                     
                     $this->update_progress($product_name, $processed);
                     
@@ -312,7 +323,7 @@ class ELKO_Product_Importer {
     /**
      * Import attributes only for existing products
      */
-    public function import_attributes_only($session_id = '') {
+    public function import_attributes_only($session_id = '', $resume_from = 0) {
         if ($this->should_stop()) {
             return false;
         }
@@ -331,14 +342,17 @@ class ELKO_Product_Importer {
             
             $total = count($elko_products);
             
-            if (!empty($session_id)) {
+            // Only init progress if not resuming
+            if (!empty($session_id) && $resume_from == 0) {
                 $this->init_progress('attributes', $total, $session_id);
+            } elseif (!empty($session_id)) {
+                $this->session_id = $session_id;
             }
             
             $updated_count = 0;
             $processed = 0;
             
-            ELKO_Logger::log_sync('attributes', 'started', "Updating attributes for {$total} products");
+            ELKO_Logger::log_sync('attributes', 'started', "Updating attributes for {$total} products" . ($resume_from > 0 ? " (resuming from #{$resume_from})" : ""));
             
             // Process in batches of 20
             $batches = array_chunk($elko_products, 20);
@@ -376,6 +390,12 @@ class ELKO_Product_Importer {
                     }
                     
                     $processed++;
+                    
+                    // Skip items if resuming
+                    if ($resume_from > 0 && $processed <= $resume_from) {
+                        continue;
+                    }
+                    
                     $product_title = get_the_title($product->post_id);
                     $this->update_progress($product_title, $processed);
                     
@@ -426,7 +446,7 @@ class ELKO_Product_Importer {
     /**
      * Fix all images - re-import gallery for existing products
      */
-    public function fix_all_images($session_id = '', $categories = array()) {
+    public function fix_all_images($session_id = '', $categories = array(), $resume_from = 0) {
         if ($this->should_stop()) {
             return false;
         }
@@ -450,14 +470,17 @@ class ELKO_Product_Importer {
             
             $total = count($elko_products);
             
-            if (!empty($session_id)) {
+            // Only init progress if not resuming
+            if (!empty($session_id) && $resume_from == 0) {
                 $this->init_progress('images', $total, $session_id);
+            } elseif (!empty($session_id)) {
+                $this->session_id = $session_id;
             }
             
             $fixed_count = 0;
             $processed = 0;
             
-            ELKO_Logger::log_sync('images', 'started', "Fixing images for {$total} products");
+            ELKO_Logger::log_sync('images', 'started', "Fixing images for {$total} products" . ($resume_from > 0 ? " (resuming from #{$resume_from})" : ""));
             
             // Process in batches of 20
             $batches = array_chunk($elko_products, 20);
@@ -495,6 +518,12 @@ class ELKO_Product_Importer {
                     }
                     
                     $processed++;
+                    
+                    // Skip items if resuming
+                    if ($resume_from > 0 && $processed <= $resume_from) {
+                        continue;
+                    }
+                    
                     $product_title = get_the_title($product->post_id);
                     $this->update_progress($product_title, $processed);
                     

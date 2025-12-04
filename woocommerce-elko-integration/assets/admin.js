@@ -7,6 +7,10 @@ jQuery(document).ready(function($) {
     var currentSessionId = elko_ajax.current_session || '';
     var progressInterval = null;
     var isBackgroundJob = false;
+    var lastProcessedCount = 0;
+    var lastProgressTime = Date.now();
+    var stuckCheckInterval = null;
+    var AUTO_RESUME_MINUTES = 5; // Auto-resume after 5 minutes of no progress
     
     // Check for active background jobs on page load
     function checkForActiveJob() {
@@ -24,6 +28,8 @@ jQuery(document).ready(function($) {
                     // Use the session ID from the active job
                     currentSessionId = response.data.session_id;
                     isBackgroundJob = true;
+                    lastProcessedCount = response.data.processed || 0;
+                    lastProgressTime = Date.now();
                     
                     // Show progress bar
                     var progressDiv = $('#sync-progress');
@@ -43,6 +49,7 @@ jQuery(document).ready(function($) {
                     
                     // Start polling for updates
                     startProgressPolling();
+                    startStuckChecker();
                 }
             },
             error: function(xhr, status, error) {
@@ -247,6 +254,9 @@ jQuery(document).ready(function($) {
             clearInterval(progressInterval);
         }
         
+        // Start the stuck checker as well
+        startStuckChecker();
+        
         progressInterval = setInterval(function() {
             $.ajax({
                 url: elko_ajax.ajax_url,
@@ -259,6 +269,14 @@ jQuery(document).ready(function($) {
                 success: function(response) {
                     if (response.success && response.data) {
                         updateProgressDisplay(response.data);
+                        
+                        // Track if progress has changed
+                        var currentProcessed = parseInt(response.data.processed) || 0;
+                        if (currentProcessed > lastProcessedCount) {
+                            lastProcessedCount = currentProcessed;
+                            lastProgressTime = Date.now();
+                            $('.progress-stuck-warning').hide();
+                        }
                         
                         if (response.data.status === 'completed' || response.data.status === 'stopped' || response.data.status === 'error') {
                             stopProgressPolling();
@@ -289,7 +307,130 @@ jQuery(document).ready(function($) {
             clearInterval(progressInterval);
             progressInterval = null;
         }
+        stopStuckChecker();
     }
+    
+    // Start stuck checker - checks if import is stuck and auto-resumes after 5 minutes
+    function startStuckChecker() {
+        if (stuckCheckInterval) {
+            clearInterval(stuckCheckInterval);
+        }
+        
+        stuckCheckInterval = setInterval(function() {
+            var minutesStuck = Math.floor((Date.now() - lastProgressTime) / 60000);
+            
+            if (minutesStuck >= 1) {
+                // Show warning
+                $('.progress-stuck-warning').show();
+                $('.stuck-time').text(minutesStuck);
+                
+                // Auto-resume after 5 minutes
+                if (minutesStuck >= AUTO_RESUME_MINUTES) {
+                    console.log('Auto-resuming after ' + AUTO_RESUME_MINUTES + ' minutes of no progress');
+                    resumeImport();
+                }
+            } else {
+                $('.progress-stuck-warning').hide();
+            }
+        }, 10000); // Check every 10 seconds
+    }
+    
+    // Stop stuck checker
+    function stopStuckChecker() {
+        if (stuckCheckInterval) {
+            clearInterval(stuckCheckInterval);
+            stuckCheckInterval = null;
+        }
+        $('.progress-stuck-warning').hide();
+    }
+    
+    // Resume import - skip stuck item and continue
+    function resumeImport() {
+        if (!currentSessionId) {
+            showResult('❌ No active session to resume.', 'error');
+            return;
+        }
+        
+        var button = $('#progress-resume');
+        button.prop('disabled', true).text('⏳ Resuming...');
+        
+        $.ajax({
+            url: elko_ajax.ajax_url,
+            type: 'POST',
+            data: {
+                action: 'elko_resume_import',
+                nonce: elko_ajax.nonce,
+                session_id: currentSessionId
+            },
+            success: function(response) {
+                if (response.success) {
+                    showResult(response.data.message || 'Resumed!', 'success');
+                    lastProgressTime = Date.now(); // Reset stuck timer
+                    lastProcessedCount = response.data.processed || lastProcessedCount;
+                    $('.progress-stuck-warning').hide();
+                } else {
+                    showResult(response.data || 'Failed to resume', 'error');
+                }
+            },
+            error: function(xhr, status, error) {
+                showResult('❌ Resume failed: ' + error, 'error');
+            },
+            complete: function() {
+                button.prop('disabled', false).text('▶️ Resume / Skip Stuck');
+            }
+        });
+    }
+    
+    // Stop import from progress bar
+    function stopImport() {
+        if (!currentSessionId) {
+            showResult('❌ No active session to stop.', 'error');
+            return;
+        }
+        
+        if (!confirm('⏹️ Stop current import? The current item will finish processing.')) {
+            return;
+        }
+        
+        var button = $('#progress-stop');
+        button.prop('disabled', true).text('⏳ Stopping...');
+        
+        $.ajax({
+            url: elko_ajax.ajax_url,
+            type: 'POST',
+            data: {
+                action: 'elko_stop_import',
+                nonce: elko_ajax.nonce,
+                session_id: currentSessionId
+            },
+            success: function(response) {
+                if (response.success) {
+                    showResult(response.data || 'Stopped!', 'success');
+                    stopProgressPolling();
+                    isBackgroundJob = false;
+                } else {
+                    showResult(response.data || 'Failed to stop', 'error');
+                }
+            },
+            error: function(xhr, status, error) {
+                showResult('❌ Stop failed: ' + error, 'error');
+            },
+            complete: function() {
+                button.prop('disabled', false).text('⏹️ Stop Import');
+            }
+        });
+    }
+    
+    // Bind progress control buttons
+    $(document).on('click', '#progress-resume', function(e) {
+        e.preventDefault();
+        resumeImport();
+    });
+    
+    $(document).on('click', '#progress-stop', function(e) {
+        e.preventDefault();
+        stopImport();
+    });
     
     // Generate new session ID using crypto API if available
     function generateSessionId() {
