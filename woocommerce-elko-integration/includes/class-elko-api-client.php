@@ -626,9 +626,82 @@ private function get_hardcoded_tree() {
     }
     
     /**
-     * Get allowed categories for import
+     * Get allowed categories for import - dynamically from API
      */
     public function get_allowed_categories() {
+        // Try to get cached categories first
+        $cached = get_transient('elko_allowed_categories');
+        if ($cached !== false && !empty($cached)) {
+            return $cached;
+        }
+        
+        // Fetch all third-level categories from API
+        $categories = $this->fetch_all_third_level_categories();
+        
+        if (!empty($categories)) {
+            // Cache for 1 hour
+            set_transient('elko_allowed_categories', $categories, HOUR_IN_SECONDS);
+            return $categories;
+        }
+        
+        // Fallback to hardcoded if API fails
+        return $this->get_fallback_categories();
+    }
+    
+    /**
+     * Fetch all third-level categories from API tree
+     */
+    public function fetch_all_third_level_categories() {
+        $tree = $this->get_category_tree();
+        
+        if (is_wp_error($tree) || !is_array($tree)) {
+            return array();
+        }
+        
+        $categories = array();
+        
+        // Recursively extract all leaf categories (those with code)
+        $this->extract_categories_recursive($tree, $categories);
+        
+        // Sort alphabetically by name
+        ksort($categories);
+        
+        return $categories;
+    }
+    
+    /**
+     * Recursively extract categories with codes (leaf categories)
+     */
+    private function extract_categories_recursive($nodes, &$categories) {
+        foreach ($nodes as $node) {
+            // If this node has a code, it's a product category
+            if (!empty($node['code']) && !empty($node['name'])) {
+                $code = $node['code'];
+                $id = $node['id'];
+                $name = $node['name'];
+                
+                // Format: CODE_ID for API calls
+                $categories[$name] = $code . '_' . $id;
+            }
+            
+            // Process children
+            if (isset($node['childs']) && is_array($node['childs']) && !empty($node['childs'])) {
+                $this->extract_categories_recursive($node['childs'], $categories);
+            }
+        }
+    }
+    
+    /**
+     * Clear categories cache (call this when categories are updated)
+     */
+    public function clear_categories_cache() {
+        delete_transient('elko_allowed_categories');
+    }
+    
+    /**
+     * Get fallback hardcoded categories if API fails
+     */
+    private function get_fallback_categories() {
         return array(
             'CPU' => 'CPU_4028',
             'Mainboards for AMD CPUs' => 'MBA_4106', 
@@ -636,20 +709,82 @@ private function get_hardcoded_tree() {
             'Memory DIMM' => 'MEM_4041',
             'Memory SODIMM' => 'MEB_5876',
             'Video Cards' => 'VGP_4047',
+            'Sound Cards' => 'SOU_6327',
             'SSD SATA' => 'SSM_4891',
             'SSD M.2' => 'SSU_5151',
             'SSD MSATA' => 'SST_6189',
+            'HDD Desktop SATA' => 'HDS_4413',
+            'HDD Mobile SATA' => 'HMS_4414',
             'Cases' => 'CAS_4816',
             'Desktop Computer PSU' => 'PSU_4817',
             'CPU Coolers' => 'COC_4481',
             'System & VGA Coolers' => 'COS_4482',
-            'HDD Desktop SATA' => 'HDS_4413',
-            'HDD Mobile SATA' => 'HMS_4414',
             'Keyboards' => 'KEY_4039',
             'Mouse Devices' => 'MOU_4045',
+            'Mouse Pads' => 'MOP_6307',
+            'Numeric Keypads' => 'KPA_8124',
             'Monitors' => 'LC3_4815',
+            'LFD Monitors' => 'LCD_6342',
             'Headphones' => 'HPH_6313',
-            'Speakers' => 'SPE_6315'
+            'Speakers' => 'SPE_6315',
+            'Microphones' => 'MIC_6471',
+            'Web Cameras' => 'WCA_4052',
+            'Laser Printers' => 'LAS_4067',
+            'All In One' => 'AIO_4065',
+            'Smartphones' => 'MPH_4997',
+            'Feature Phones' => 'MPF_7064',
+            'Smartphone Covers & Cases' => 'MPC_6747',
+            'Phone Screen Protectors' => 'MSP_6756',
+            'Phone Car Mounts' => 'MHC_6792',
+            'Phone Accessories' => 'MPA_5039',
+            'Tablets' => 'TPC_6383',
+            'Children\'s tablets' => 'CHT_8120',
+            'E-Readers & Accessories' => 'ERD_6385',
+            'Tablet Accessories' => 'TPA_6384',
+            'Tablet Sleeves' => 'TSL_6748',
+            'Switches' => 'SWI_4060',
+            'Routers' => 'ROU_5161',
+            'Wired Network Adapters' => 'NIC_4056',
+            'POE Devices' => 'POE_5158',
+            'Media Convertors & Modules' => 'MCO_4055',
+            'Wireless Routers' => 'WRO_5204',
+            'Wireless Access Points' => 'WAP_5189',
+            'Wireless Network Adapters' => 'WRA_4401',
+            'Wireless Range Extenders' => 'WRE_5203',
+            '3G/4G Routers' => 'WR3_5198',
+            'IP Cameras' => 'FNC_4949',
+            'NVR' => 'NVR_4960',
+            'DVR' => 'STD_4935',
+            'HDCVI Cameras' => 'HSC_5065',
+            'Accessories CCTV IP' => 'IPC_4962',
+            'Control Panels' => 'CNP_4928',
+            'Detectors' => 'MDE_4919',
+            'Keypads' => 'SKP_4942',
+            'Sirens' => 'SIR_6209',
+            'Doorphone Systems' => 'DEV_6648',
+            'Network Doorphones' => 'NDP_6646',
+            'Standalone Locks' => 'DCL_4955',
+            'Door Controllers' => 'CRL_4982',
+            'Servers' => 'SER_5809',
+            'Server Mainboards' => 'MBS_4119',
+            'Server Memory' => 'MES_4363',
+            'Server PSU' => 'SPU_5173',
+            'Server Parts' => 'SCO_4073',
+            'HDD Enterprise SAS' => 'HDC_4142',
+            'HDD Enterprise SATA' => 'HES_5111',
+            'SSD Enterprise PCI-E' => 'SSP_5183',
+            'SSD Enterprise SAS' => 'SSS_5137',
+            'SSD Enterprise SATA' => 'SFM_5025',
+            'TV Sets' => 'TVP_4372',
+            'Media Players' => 'TMP_4848',
+            'Portable TVs & Monitors' => 'PTV_8087',
+            'MP3 Players' => 'MMD_6316',
+            'Home Audio' => 'HAV_6883',
+            'Soundbar Speakers' => 'SBR_6395',
+            'Video Cameras' => 'VCA_4356',
+            'Instant Cameras' => 'INS_6248',
+            'Drones' => 'DRO_7010',
+            'Gimbals' => 'GIM_7039'
         );
     }
     

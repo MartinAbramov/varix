@@ -638,39 +638,11 @@ class ELKO_Product_Importer {
     }
     
     /**
-     * Get third-level categories
+     * Get third-level categories dynamically from API
      */
     private function get_third_level_categories() {
-        return array(
-            'CPU' => 'CPU_4028',
-            'Mainboards for AMD CPUs' => 'MBA_4106', 
-            'Mainboards for Intel CPUs' => 'MBI_4040',
-            'Memory DIMM' => 'MEM_4041',
-            'Memory SODIMM' => 'MEB_5876',
-            'Video Cards' => 'VGP_4047',
-            'Sound Cards' => 'SOU_6327',
-            'SSD SATA' => 'SSM_4891',
-            'SSD M.2' => 'SSU_5151',
-            'SSD MSATA' => 'SST_6189',
-            'HDD Desktop SATA' => 'HDS_4413',
-            'HDD Mobile SATA' => 'HMS_4414',
-            'Cases' => 'CAS_4816',
-            'Desktop Computer PSU' => 'PSU_4817',
-            'CPU Coolers' => 'COC_4481',
-            'System & VGA Coolers' => 'COS_4482',
-            'Keyboards' => 'KEY_4039',
-            'Mouse Devices' => 'MOU_4045',
-            'Mouse Pads' => 'MOP_6307',
-            'Numeric Keypads' => 'KPA_8124',
-            'Monitors' => 'LC3_4815',
-            'LFD Monitors' => 'LCD_6342',
-            'Headphones' => 'HPH_6313',
-            'Speakers' => 'SPE_6315',
-            'Microphones' => 'MIC_6471',
-            'Web Cameras' => 'WCA_4052',
-            'Laser Printers' => 'LAS_4067',
-            'All In One' => 'AIO_4065'
-        );
+        // Use API client to get all allowed categories dynamically
+        return $this->api_client->get_allowed_categories();
     }
     
     /**

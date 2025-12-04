@@ -295,6 +295,55 @@ jQuery(document).ready(function($) {
         makeAjaxRequest('elko_fix_images', {}, $(this), true);
     });
     
+    // Refresh Categories List
+    $('#refresh-categories').on('click', function(e) {
+        e.preventDefault();
+        
+        var button = $(this);
+        var resultSpan = $('#refresh-categories-result');
+        
+        button.prop('disabled', true).text('⏳ Loading...');
+        resultSpan.text('');
+        
+        $.ajax({
+            url: elko_ajax.ajax_url,
+            type: 'POST',
+            data: {
+                action: 'elko_refresh_categories',
+                nonce: elko_ajax.nonce
+            },
+            success: function(response) {
+                if (response.success) {
+                    resultSpan.html('<span style="color: green;">' + response.data.message + '</span>');
+                    
+                    // Update the categories dropdown
+                    if (response.data.categories) {
+                        var select = $('#import-categories');
+                        select.empty();
+                        
+                        $.each(response.data.categories, function(name, code) {
+                            select.append($('<option>', {
+                                value: code,
+                                text: name
+                            }));
+                        });
+                        
+                        // Update the count display
+                        select.siblings('.description').first().next('.description').html('<strong>' + response.data.count + '</strong> categories available.');
+                    }
+                } else {
+                    resultSpan.html('<span style="color: red;">' + response.data + '</span>');
+                }
+            },
+            error: function(xhr, status, error) {
+                resultSpan.html('<span style="color: red;">Error: ' + error + '</span>');
+            },
+            complete: function() {
+                button.prop('disabled', false).text('🔄 Refresh Categories List from API');
+            }
+        });
+    });
+    
     // Clear All Data
     $('#clear-all-data').on('click', function(e) {
         e.preventDefault();

@@ -31,6 +31,7 @@ class ELKO_Admin_Panel {
         add_action('wp_ajax_elko_get_progress', array($this, 'ajax_get_progress'));
         add_action('wp_ajax_elko_stop_import', array($this, 'ajax_stop_import'));
         add_action('wp_ajax_elko_save_settings', array($this, 'ajax_save_settings'));
+        add_action('wp_ajax_elko_refresh_categories', array($this, 'ajax_refresh_categories'));
 
         // Initialize emergency stop check
         $this->check_emergency_stop();
@@ -553,6 +554,46 @@ class ELKO_Admin_Panel {
     }
     
     /**
+     * AJAX Refresh Categories Cache
+     */
+    public function ajax_refresh_categories() {
+        check_ajax_referer('elko_ajax_nonce', 'nonce');
+        
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error('Insufficient permissions.');
+            return;
+        }
+        
+        try {
+            $api_client = new ELKO_API_Client();
+            
+            // Clear the cache
+            $api_client->clear_categories_cache();
+            
+            // Fetch fresh categories from API
+            $categories = $api_client->get_allowed_categories();
+            
+            if (empty($categories)) {
+                wp_send_json_error('❌ Failed to fetch categories from API. Using fallback list.');
+                return;
+            }
+            
+            $count = count($categories);
+            
+            ELKO_Logger::log_sync('categories', 'success', "Refreshed categories list. Found {$count} categories.");
+            
+            wp_send_json_success(array(
+                'message' => "✅ Successfully refreshed categories. Found {$count} product categories!",
+                'count' => $count,
+                'categories' => $categories
+            ));
+            
+        } catch (Exception $e) {
+            wp_send_json_error('❌ Failed to refresh categories: ' . $e->getMessage());
+        }
+    }
+    
+    /**
      * AJAX Get Progress
      */
     public function ajax_get_progress() {
@@ -818,6 +859,14 @@ class ELKO_Admin_Panel {
                     <?php endforeach; ?>
                 </select>
                 <p class="description"><?php esc_html_e('Hold Ctrl/Cmd to select multiple categories.', 'woocommerce-elko-integration'); ?></p>
+                <p class="description"><strong><?php echo count($allowed_categories); ?></strong> categories available.</p>
+            </div>
+            
+            <div style="margin-top: 10px;">
+                <button type="button" id="refresh-categories" class="button button-secondary">
+                    🔄 Refresh Categories List from API
+                </button>
+                <span id="refresh-categories-result" style="margin-left: 10px;"></span>
             </div>
         </div>
         

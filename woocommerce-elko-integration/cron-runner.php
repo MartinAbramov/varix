@@ -89,6 +89,14 @@ try {
     switch ($action) {
         case 'sync_products':
             echo "Starting product sync...\n";
+            
+            // Clear categories cache to ensure we have the latest from API
+            if (class_exists('ELKO_API_Client')) {
+                $api_client = new ELKO_API_Client();
+                $api_client->clear_categories_cache();
+                echo "Categories cache cleared.\n";
+            }
+            
             echo "Categories to process: all defined categories\n";
             if (class_exists('ELKO_Product_Importer')) {
                 $importer = new ELKO_Product_Importer();
