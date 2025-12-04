@@ -33,6 +33,7 @@ class ELKO_Admin_Panel {
         add_action('wp_ajax_elko_save_settings', array($this, 'ajax_save_settings'));
         add_action('wp_ajax_elko_refresh_categories', array($this, 'ajax_refresh_categories'));
         add_action('wp_ajax_elko_start_background_job', array($this, 'ajax_start_background_job'));
+        add_action('wp_ajax_elko_get_active_job', array($this, 'ajax_get_active_job'));
 
         // Initialize emergency stop check
         $this->check_emergency_stop();
@@ -790,6 +791,61 @@ class ELKO_Admin_Panel {
             'percentage' => $percentage,
             'error_count' => intval($progress->error_count),
             'last_error' => $progress->last_error
+        ));
+    }
+    
+    /**
+     * AJAX Get Active Job - returns any currently running background job
+     */
+    public function ajax_get_active_job() {
+        check_ajax_referer('elko_ajax_nonce', 'nonce');
+        
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error('Insufficient permissions.');
+            return;
+        }
+        
+        global $wpdb;
+        $progress_table = $wpdb->prefix . 'elko_import_progress';
+        
+        // Check if table exists
+        if ($wpdb->get_var("SHOW TABLES LIKE '{$progress_table}'") != $progress_table) {
+            wp_send_json_success(array(
+                'has_active_job' => false
+            ));
+            return;
+        }
+        
+        // Get any job that is currently running (status = 'running' or 'starting')
+        $active_job = $wpdb->get_row(
+            "SELECT * FROM {$progress_table} 
+             WHERE status IN ('running', 'starting') 
+             ORDER BY started_at DESC 
+             LIMIT 1"
+        );
+        
+        if (!$active_job) {
+            wp_send_json_success(array(
+                'has_active_job' => false
+            ));
+            return;
+        }
+        
+        $percentage = $active_job->total_items > 0 
+            ? round(($active_job->processed_items / $active_job->total_items) * 100, 1)
+            : 0;
+        
+        wp_send_json_success(array(
+            'has_active_job' => true,
+            'session_id' => $active_job->session_id,
+            'import_type' => $active_job->import_type,
+            'status' => $active_job->status,
+            'total' => intval($active_job->total_items),
+            'processed' => intval($active_job->processed_items),
+            'current_item' => $active_job->current_item,
+            'percentage' => $percentage,
+            'error_count' => intval($active_job->error_count),
+            'started_at' => $active_job->started_at
         ));
     }
     

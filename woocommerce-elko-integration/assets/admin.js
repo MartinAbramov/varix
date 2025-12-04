@@ -8,6 +8,52 @@ jQuery(document).ready(function($) {
     var progressInterval = null;
     var isBackgroundJob = false;
     
+    // Check for active background jobs on page load
+    function checkForActiveJob() {
+        $.ajax({
+            url: elko_ajax.ajax_url,
+            type: 'POST',
+            data: {
+                action: 'elko_get_active_job',
+                nonce: elko_ajax.nonce
+            },
+            success: function(response) {
+                if (response.success && response.data && response.data.has_active_job) {
+                    console.log('Found active background job:', response.data);
+                    
+                    // Use the session ID from the active job
+                    currentSessionId = response.data.session_id;
+                    isBackgroundJob = true;
+                    
+                    // Show progress bar
+                    var progressDiv = $('#sync-progress');
+                    progressDiv.show();
+                    
+                    // Update display with current status
+                    updateProgressDisplay({
+                        current_item: response.data.current_item || 'Processing...',
+                        total: response.data.total,
+                        processed: response.data.processed,
+                        percentage: response.data.percentage,
+                        error_count: response.data.error_count || 0
+                    });
+                    
+                    // Show info message
+                    showResult('🔄 Active background job found: ' + response.data.import_type + '. Resuming progress display...', 'success');
+                    
+                    // Start polling for updates
+                    startProgressPolling();
+                }
+            },
+            error: function(xhr, status, error) {
+                console.log('Error checking for active job:', error);
+            }
+        });
+    }
+    
+    // Check for active jobs when page loads
+    checkForActiveJob();
+    
     // Helper function for background job requests (fire and forget - continues even if page is closed)
     function startBackgroundJob(jobAction, data, button) {
         data = data || {};
