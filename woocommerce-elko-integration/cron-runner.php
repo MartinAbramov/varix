@@ -56,13 +56,23 @@ if (empty($stored_key)) {
     update_option('elko_cron_secret_key', $stored_key);
 }
 
-// Check if running from CLI or with valid secret key
+// Check for internal background job token
+$internal_token = isset($_GET['internal_token']) ? $_GET['internal_token'] : '';
+$stored_internal_token = get_transient('elko_internal_job_token');
+
+// Check if running from CLI or with valid secret key or valid internal token
 $is_cli = (php_sapi_name() === 'cli');
 $is_valid_key = (!empty($secret_key) && $secret_key === $stored_key);
+$is_internal_job = (!empty($internal_token) && !empty($stored_internal_token) && $internal_token === $stored_internal_token);
 
-if (!$is_cli && !$is_valid_key) {
+if (!$is_cli && !$is_valid_key && !$is_internal_job) {
     header('HTTP/1.1 403 Forbidden');
     die('Access denied. Use CLI or provide valid secret key.');
+}
+
+// If this is an internal job, delete the token after use (one-time use)
+if ($is_internal_job) {
+    delete_transient('elko_internal_job_token');
 }
 
 // Log start
@@ -84,6 +94,12 @@ if ($is_cli && isset($argv[1])) {
 delete_option('elko_import_stop_requested');
 delete_option('elko_emergency_stop');
 delete_option('elko_force_stop');
+
+// Get session_id from URL parameter for progress tracking
+$session_id = isset($_GET['session_id']) ? sanitize_text_field($_GET['session_id']) : '';
+if (empty($session_id)) {
+    $session_id = 'cron_' . time() . '_' . wp_generate_password(8, false, false);
+}
 
 try {
     switch ($action) {
@@ -108,7 +124,7 @@ try {
                     echo "Filtering by categories: " . implode(', ', $selected_categories) . "\n";
                 }
                 
-                $result = $importer->import_products($selected_categories);
+                $result = $importer->import_products($selected_categories, $session_id);
                 
                 if ($result !== false) {
                     update_option('elko_last_product_sync', current_time('mysql'));
@@ -178,7 +194,7 @@ try {
             echo "Starting image fix...\n";
             if (class_exists('ELKO_Product_Importer')) {
                 $importer = new ELKO_Product_Importer();
-                $result = $importer->fix_all_images();
+                $result = $importer->fix_all_images($session_id);
                 
                 if ($result !== false) {
                     echo "✅ Image fix completed. Fixed: {$result} products\n";
@@ -197,7 +213,7 @@ try {
             echo "Starting attributes import...\n";
             if (class_exists('ELKO_Product_Importer')) {
                 $importer = new ELKO_Product_Importer();
-                $result = $importer->import_attributes_only();
+                $result = $importer->import_attributes_only($session_id);
                 
                 if ($result !== false) {
                     echo "✅ Attributes import completed. Updated: {$result} products\n";

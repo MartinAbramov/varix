@@ -6,8 +6,67 @@ jQuery(document).ready(function($) {
     
     var currentSessionId = elko_ajax.current_session || '';
     var progressInterval = null;
+    var isBackgroundJob = false;
     
-    // Helper function for AJAX requests
+    // Helper function for background job requests (fire and forget - continues even if page is closed)
+    function startBackgroundJob(jobAction, data, button) {
+        data = data || {};
+        data.action = 'elko_start_background_job';
+        data.job_action = jobAction;
+        data.nonce = elko_ajax.nonce;
+        data.session_id = currentSessionId;
+        
+        if (button) {
+            button.prop('disabled', true);
+            var originalText = button.text();
+            button.text('⏳ Starting...');
+        }
+        
+        console.log('Starting background job:', jobAction, data);
+        
+        showProgress('🚀 Starting background job...');
+        
+        $.ajax({
+            url: elko_ajax.ajax_url,
+            type: 'POST',
+            data: data,
+            timeout: 30000, // 30 seconds to start the job
+            success: function(response) {
+                console.log('Background job started:', response);
+                
+                if (response.success) {
+                    isBackgroundJob = true;
+                    showResult(response.data.message || response.data, 'success');
+                    showProgress('🔄 Import running in background. Progress updates below...');
+                    startProgressPolling();
+                    
+                    // Re-enable button but keep polling
+                    if (button) {
+                        button.prop('disabled', false);
+                        button.text(originalText);
+                    }
+                } else {
+                    showResult(response.data || 'Failed to start background job', 'error');
+                    hideProgress();
+                    if (button) {
+                        button.prop('disabled', false);
+                        button.text(originalText);
+                    }
+                }
+            },
+            error: function(xhr, status, error) {
+                console.log('Error starting background job:', xhr, status, error);
+                showResult('Failed to start background job: ' + error, 'error');
+                hideProgress();
+                if (button) {
+                    button.prop('disabled', false);
+                    button.text(originalText);
+                }
+            }
+        });
+    }
+    
+    // Helper function for regular AJAX requests (foreground - requires open tab)
     function makeAjaxRequest(action, data, button, showProgressBar) {
         data = data || {};
         data.action = action;
@@ -128,6 +187,9 @@ jQuery(document).ready(function($) {
         if (data.error_count > 0) {
             statsText += ' | Errors: ' + data.error_count;
         }
+        if (isBackgroundJob) {
+            statsText += ' | 🔄 Running in background';
+        }
         progressDiv.find('.progress-stats').text(statsText);
         
         progressDiv.find('.progress-fill').css('width', data.percentage + '%');
@@ -154,11 +216,25 @@ jQuery(document).ready(function($) {
                         
                         if (response.data.status === 'completed' || response.data.status === 'stopped' || response.data.status === 'error') {
                             stopProgressPolling();
+                            isBackgroundJob = false;
+                            
+                            // Show completion message
+                            if (response.data.status === 'completed') {
+                                showResult('✅ Background job completed! Processed ' + response.data.processed + ' items.', 'success');
+                            } else if (response.data.status === 'stopped') {
+                                showResult('⏹️ Background job was stopped. Processed ' + response.data.processed + ' items.', 'success');
+                            } else {
+                                showResult('❌ Background job encountered an error.', 'error');
+                            }
+                            
+                            setTimeout(function() {
+                                hideProgress();
+                            }, 2000);
                         }
                     }
                 }
             });
-        }, 1000); // Poll every second
+        }, 2000); // Poll every 2 seconds for background jobs (less aggressive)
     }
     
     // Stop progress polling
@@ -230,69 +306,71 @@ jQuery(document).ready(function($) {
         makeAjaxRequest('elko_toggle_scheduler', { force_action: isDisabling ? 'disable' : 'enable' }, $(this));
     });
     
-    // Sync Categories
+    // Sync Categories - uses background job
     $('#sync-categories').on('click', function(e) {
         e.preventDefault();
         
-        if (!confirm('Start category synchronization? This will import hierarchical categories from ELKO API.')) {
+        if (!confirm('Start category synchronization in BACKGROUND? This will import hierarchical categories from ELKO API.\n\n🔄 You can close this page - the import will continue!')) {
             return;
         }
         
         generateSessionId();
-        makeAjaxRequest('elko_sync_categories', {}, $(this), true);
+        startBackgroundJob('sync_categories', {}, $(this));
     });
     
-    // Sync Products
+    // Sync Products - uses background job
     $('#sync-products').on('click', function(e) {
         e.preventDefault();
         
         var selectedCategories = getSelectedCategories();
         var categoryMsg = selectedCategories.length > 0 
-            ? 'Import products from ' + selectedCategories.length + ' selected categories?'
-            : 'Import products from ALL allowed categories? This may take a long time.';
+            ? 'Import products from ' + selectedCategories.length + ' selected categories in BACKGROUND?'
+            : 'Import products from ALL categories in BACKGROUND? This may take a while.';
+        
+        categoryMsg += '\n\n🔄 You can close this page - the import will continue!';
         
         if (!confirm(categoryMsg)) {
             return;
         }
         
         generateSessionId();
-        makeAjaxRequest('elko_sync_products', { categories: selectedCategories }, $(this), true);
+        startBackgroundJob('sync_products', { categories: selectedCategories }, $(this));
     });
     
-    // Import Attributes
+    // Import Attributes - uses background job
     $('#import-attributes').on('click', function(e) {
         e.preventDefault();
         
-        if (!confirm('Import/update attributes for all existing ELKO products? This will fetch data from the Description API endpoint.')) {
+        if (!confirm('Import/update attributes for all ELKO products in BACKGROUND?\n\n🔄 You can close this page - the import will continue!')) {
             return;
         }
         
         generateSessionId();
-        makeAjaxRequest('elko_import_attributes', {}, $(this), true);
+        startBackgroundJob('import_attributes', {}, $(this));
     });
     
-    // Update Prices
+    // Update Prices - uses background job
     $('#update-prices').on('click', function(e) {
         e.preventDefault();
         
-        if (!confirm('Update all product prices and stock from ELKO API?')) {
+        if (!confirm('Update all product prices and stock in BACKGROUND?\n\n🔄 You can close this page - the import will continue!')) {
             return;
         }
         
         generateSessionId();
-        makeAjaxRequest('elko_update_prices', {}, $(this), true);
+        startBackgroundJob('update_prices', {}, $(this));
     });
     
-    // Fix Images
+    // Fix Images - uses background job
     $('#fix-images').on('click', function(e) {
         e.preventDefault();
         
-        if (!confirm('Re-import all product images? This will delete existing images and download fresh ones from ELKO.')) {
+        if (!confirm('Re-import all product images in BACKGROUND? This will delete existing images and download fresh ones from ELKO.\n\n🔄 You can close this page - the import will continue!')) {
             return;
         }
         
         generateSessionId();
-        makeAjaxRequest('elko_fix_images', {}, $(this), true);
+        startBackgroundJob('fix_images', {}, $(this));
     });
     
     // Refresh Categories List

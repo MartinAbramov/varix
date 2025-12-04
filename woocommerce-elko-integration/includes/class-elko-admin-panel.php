@@ -32,9 +32,157 @@ class ELKO_Admin_Panel {
         add_action('wp_ajax_elko_stop_import', array($this, 'ajax_stop_import'));
         add_action('wp_ajax_elko_save_settings', array($this, 'ajax_save_settings'));
         add_action('wp_ajax_elko_refresh_categories', array($this, 'ajax_refresh_categories'));
+        add_action('wp_ajax_elko_start_background_job', array($this, 'ajax_start_background_job'));
 
         // Initialize emergency stop check
         $this->check_emergency_stop();
+    }
+    
+    /**
+     * Start a background job by spawning a non-blocking request to cron-runner.php
+     */
+    private function spawn_background_job($action, $session_id, $params = array()) {
+        // Generate a one-time internal token
+        $internal_token = wp_generate_password(32, false);
+        set_transient('elko_internal_job_token', $internal_token, 3600); // 1 hour validity
+        
+        // Build the URL
+        $cron_runner_url = plugins_url('cron-runner.php', dirname(__FILE__));
+        $url_params = array(
+            'action' => $action,
+            'session_id' => $session_id,
+            'internal_token' => $internal_token
+        );
+        
+        // Merge additional params
+        if (!empty($params['categories'])) {
+            $url_params['categories'] = implode(',', $params['categories']);
+        }
+        
+        $url = add_query_arg($url_params, $cron_runner_url);
+        
+        // Send a non-blocking request (fire and forget)
+        $args = array(
+            'timeout' => 0.01, // Very short timeout - we don't wait for response
+            'blocking' => false, // Non-blocking
+            'sslverify' => false,
+            'cookies' => array(),
+            'headers' => array(
+                'User-Agent' => 'ELKO-Background-Job/1.0'
+            )
+        );
+        
+        // Log that we're starting
+        ELKO_Logger::log_sync('background-job', 'started', "Starting background {$action} with session {$session_id}");
+        
+        // Fire the request
+        wp_remote_get($url, $args);
+        
+        return true;
+    }
+    
+    /**
+     * AJAX Start Background Job
+     */
+    public function ajax_start_background_job() {
+        check_ajax_referer('elko_ajax_nonce', 'nonce');
+        
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error('Insufficient permissions.');
+            return;
+        }
+        
+        $action = isset($_POST['job_action']) ? sanitize_text_field($_POST['job_action']) : '';
+        $session_id = isset($_POST['session_id']) ? sanitize_text_field($_POST['session_id']) : wp_generate_uuid4();
+        
+        $allowed_actions = array('sync_products', 'sync_categories', 'update_prices', 'fix_images', 'import_attributes');
+        
+        if (!in_array($action, $allowed_actions)) {
+            wp_send_json_error('Invalid action.');
+            return;
+        }
+        
+        // Clear stop flags
+        delete_option('elko_import_stop_requested');
+        delete_option('elko_emergency_stop');
+        delete_option('elko_force_stop');
+        
+        // Prepare params
+        $params = array();
+        if (!empty($_POST['categories']) && is_array($_POST['categories'])) {
+            $params['categories'] = array_map('sanitize_text_field', $_POST['categories']);
+        }
+        
+        // Initialize progress record
+        $this->init_background_progress($action, $session_id);
+        
+        // Spawn background job
+        $this->spawn_background_job($action, $session_id, $params);
+        
+        wp_send_json_success(array(
+            'message' => "🚀 Background {$action} started! You can close this page - the import will continue.",
+            'session_id' => $session_id,
+            'background' => true
+        ));
+    }
+    
+    /**
+     * Initialize progress record for background job
+     */
+    private function init_background_progress($action, $session_id) {
+        global $wpdb;
+        $progress_table = $wpdb->prefix . 'elko_import_progress';
+        
+        // Ensure table exists
+        $this->ensure_progress_table_exists();
+        
+        $wpdb->insert(
+            $progress_table,
+            array(
+                'import_type' => $action,
+                'session_id' => $session_id,
+                'total_items' => 0,
+                'processed_items' => 0,
+                'current_item' => 'Initializing background job...',
+                'status' => 'starting',
+                'started_at' => current_time('mysql')
+            ),
+            array('%s', '%s', '%d', '%d', '%s', '%s', '%s')
+        );
+    }
+    
+    /**
+     * Ensure progress table exists
+     */
+    private function ensure_progress_table_exists() {
+        global $wpdb;
+        $progress_table = $wpdb->prefix . 'elko_import_progress';
+        
+        $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$progress_table}'") == $progress_table;
+        
+        if (!$table_exists) {
+            $charset_collate = $wpdb->get_charset_collate();
+            $sql = "CREATE TABLE {$progress_table} (
+                id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+                import_type varchar(50) NOT NULL,
+                session_id varchar(64) NOT NULL,
+                total_items int(11) NOT NULL DEFAULT 0,
+                processed_items int(11) NOT NULL DEFAULT 0,
+                current_item varchar(255) DEFAULT NULL,
+                status varchar(20) NOT NULL DEFAULT 'running',
+                started_at datetime DEFAULT CURRENT_TIMESTAMP,
+                updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                completed_at datetime DEFAULT NULL,
+                error_count int(11) NOT NULL DEFAULT 0,
+                last_error text,
+                PRIMARY KEY (id),
+                KEY session_id (session_id),
+                KEY status (status)
+            ) {$charset_collate};";
+            
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta($sql);
+        }
     }
     
     /**
